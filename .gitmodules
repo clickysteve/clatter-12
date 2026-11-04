@@ -1,0 +1,3 @@
+[submodule "third_party/clatter-pocket"]
+	path = third_party/clatter-pocket
+	url = https://github.com/clickysteve/clatter-pocket.git
