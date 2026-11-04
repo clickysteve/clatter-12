@@ -7,6 +7,9 @@ page). Everything passes on the host (`make`, `make test-wasm`), compiles and li
 Cortex-M33 (`make m33`), and runs in QEMU's Cortex-M33 model (`make m33-bench`). This version has not
 run in Plinky's emulator or on a Plinky 12; nothing has been flashed.
 
+CI (`.github/workflows/ci.yml`) is green on `main` from `771d132`: host tests, Cortex-M33 compile, QEMU bench,
+WebAssembly tests, and the API check against Plinky's published headers (52 names).
+
 **What the next session should do first**
 1. Paste `build/clatter_12.cpp` into Plinky's IDE, **Test**: every page, a save to a slot and its load,
    page scrolling with the side buttons. The save page and the serialiser have only met the simulator's
