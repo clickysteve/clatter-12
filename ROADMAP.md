@@ -2,60 +2,75 @@
 
 v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on a Plinky 12.
 
-## Done (0.0.1-exp, host and cross-compile only)
+## Done (host, simulator, cross-compile and QEMU only)
 
-LXR engine in one panel file; 44.14 → 32 kHz conversion; seven-track 16-step grid with pressure
-velocity, variation lanes, four pages with copy, length; GEN / MUT / KIT / STYLE / UNDO / CLR;
-Plinky transport and tempo; DSP load page and log; tests; Cortex-M33 compile.
+- 0.0.1-exp: LXR engine in one panel file; 44.14 → 32 kHz conversion; 16-step grid with pressure velocity;
+  GEN / MUT / KIT / STYLE / UNDO / CLR; Plinky transport and tempo; DSP load page and log; first emulator run.
+- This version (docs/DESIGN.md):
+  - [x] Pages on Plinky's convention: SEQ, SOUND, GEN, MIX, FX, SAVE; row 15 the same on all.
+  - [x] Variation lanes removed; tap on / tap off / hold to select and edit; several held steps edited together.
+  - [x] Conditions on steps (Pocket's: 1:2 … 4:4, 25/50/75 %), counted over whole passes.
+  - [x] Ratchets 1, 2, 3, 4, 6, 8 strokes; even, accelerating, decelerating, random spacing; CLATTER Web's
+        ratchet decay and roll velocity shapes.
+  - [x] SOUND: every LXR parameter of a voice (CLATTER Web's table), a row each, three banks, fine ±, audition.
+  - [x] Real kit generation: new kit, new sound, mutate kit or sound, wildness, amount, sound locks; undo/redo.
+  - [x] Generator controls: style, density, complexity, mutation strength, track locks, one-track generate.
+  - [x] Mixer in the audio path: level, pan, mute, solo, delay and reverb sends, master.
+  - [x] FX: the LXR firmware's drive, ring modulator and compressor; bit reduction; the LXR's sample-rate
+        reduction; output limiter (the emulator's clipping).
+  - [x] Saving: `on_serialise`, one versioned, CRC-checked project; Plinky's save page.
+  - [x] Undo/redo: 16 levels, edits of one kind merged.
+  - [x] Swing on SEQ.
+  - [x] Cortex-M33 build fixed for GCC 13 (`_sram` section conflict); sizes now include the panel.
+  - [x] CPU estimate in QEMU's Cortex-M33 model (`make m33-bench`).
+  - [x] The project page runs the panel itself (WebAssembly).
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 
-- [x] Run `clatter_12.cpp` in Plinky's IDE emulator (done 2026-11-04: compiles, links, runs; see TESTING.md).
-- [ ] Clipping seen in the emulator (17 samples in ~4 min of editing): more headroom than the current
-      -3 dB, or a soft limiter before the 16-bit stage; then check the level through Plinky's output.
-- [ ] Make the load readout work: `time_us()` gave 0 per block in the emulator. Try counting blocks
-      per UI frame or another block timer; verify on a device.
-- [ ] First device run: link result, DSP page/log numbers idle and busy, crackle or not.
-- [ ] If over budget: `_sram` variant; profile per stage (`time_us` around LXR render and converter);
-      skip silent voices; shorter converter. Only then consider rate or voice changes, measured.
+- [ ] Run this version in Plinky's IDE emulator: pages, saving to a slot and loading it, page scrolling.
+- [ ] **First device run: the DSP page and log, idle, all tracks, FX on.** QEMU says the default engine
+      executes at least 56 % (mean) and 81 % (busiest block) of a 150 MHz core 1's cycles; it may not fit.
+- [ ] If over budget, in order (each keeps the LXR's synthesis): `clatter_12_sram.cpp` (LXR code in
+      SRAM); the converter in SRAM and with fewer taps (35 000 instructions a block now); skip a voice's
+      render while it is silent (Pocket notes the filter/LFO state care needed); spread the two-LXR-block
+      peaks with one more block of output buffering if Plinky's DMA allows; only then a lower LXR rate.
 - [ ] Settle table placement (SRAM / PSRAM / inside the panel arena with a custom staged-load commit).
-- [ ] Settle source size with Plinky (limit, or compaction).
-- [ ] Confirm `SAMPLE_FREQ` and output level through Plinky's chain.
+- [ ] Settle source size with Plinky: 403 KB compact now (the IDE's Test took 306 KB; another author
+      reports ~200 KB for Flash). Identifier compaction or dropping unused LXR paths if needed.
+- [ ] Confirm `SAMPLE_FREQ`, output level through Plinky's chain, and that the sends reach its effects.
+- [ ] Make the load readout work in the emulator (`time_us()` is frozen within a block there).
 
 ## 2. Reliable sequencing
 
-- [ ] Phase-lock to Plinky's clock: feed Pocket's external-clock input from `clock_phase` (24 ppqn),
-      so MIDI/CV clock in and out and other panels agree.
-- [ ] Swing (Pocket has it) on a control.
-- [ ] Conditional steps (Pocket has them) and per-step pitch.
+- [ ] Phase-lock to Plinky's clock: feed Pocket's external-clock input from `clock_phase` (24 ppqn).
+- [ ] Per-step pitch (Pocket's cells carry a note; no control yet).
+- [ ] Parameter locks per step (Pocket has two one-hit locks per trigger).
 
 ## 3. Hardware interface
 
-- [ ] Touch latency and LED cost measured on device.
-- [ ] Second page: per-track mute, lock, generate one track, density/complexity, kit wildness.
-- [ ] Live pads: pressure-triggered hits (record into the pattern, quantised like Pocket's).
-- [ ] Multi-level undo (Pocket's `ui/pocket_history.c`, possibly in the shadow arena).
+- [ ] Touch latency and LED cost on device; check the dim tiers are visible.
+- [ ] Live recording from the audition pads, quantised like Pocket's.
+- [ ] Holding a parameter pad with pressure for fine moves (now: − and + pads).
 
 ## 4. Generative features
 
-- [ ] Density and complexity controls; per-track generate; mutation strength; kit mutation
-      (`pocket_kit_voice`); style browsing with names drawn on the grid.
+- [ ] Kit evolution over time (CLATTER Web's `evolveKit`), rolls into hits (CLATTER Web's ROLLS layer).
 
 ## 5. Storage
 
-- [ ] `on_serialise`: pattern (64 steps × 7), length, tempo, kit, style/seed; Plinky's save/load page
-      (`panel_page_t::saveload`) on page 1. Reset every field before reading (a known Plinky gotcha).
+- [ ] Panel preferences (`on_serialise_settings`): none yet.
+- [ ] Older project versions: the loader refuses any version but 1 today; a v2 must read v1.
 
 ## 6. MIDI / CV
 
 - [ ] MIDI in: notes trigger tracks (queued from `on_midi`, applied in `on_ui`); out: steps as notes.
 - [ ] MIDI out 2 as two trigger outputs; CV out accents.
 
-## 7. Performance refinements
+## 7. Effects
 
-- [ ] Only after 1-3: LXR FX bus (64 KB delay, in PSRAM?), reverb/delay sends into Plinky's FX.
+- [ ] The LXR's own delay (64 KB half-float memory; PSRAM?) only if CPU allows; Plinky's delay and reverb
+      are used through the sends instead.
 
 ## Before sharing
 
 - [ ] Plinky firmware licence vs GPL-3.0 for prebuilt firmware (FEASIBILITY.md §5).
-- [ ] GitHub repository `clickysteve/clatter-12` and CI (workflow included, untried on GitHub).

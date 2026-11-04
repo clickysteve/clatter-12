@@ -1,19 +1,63 @@
 # Testing
 
-`make test` runs all of these. None involves a Plinky 12; none is hardware verification.
+`make test` runs the host tests; `make m33` the Cortex-M33 compile and link check; `make m33-bench` the
+instruction counts in QEMU; `make test-wasm` the page's WebAssembly build. None involves a Plinky 12;
+none is hardware verification.
 
-| Test | What it shows | Result (2026-11-03, macOS, Apple clang 21) |
+| Test | What it shows | Result (2026-11-04, Linux, clang 18, GCC 13.2 for Arm) |
 |---|---|---|
-| `test_resampler` | 44 140 → 32 000 Hz converter: gain 100 Hz-12 kHz, alias rejection, exact long-run rate, other output rates | 0.003 dB to 12 kHz; aliases -70.7 dB (19 kHz), -73.5 dB (20 kHz), -78.2 dB (22 kHz); no drift over 100 s; 12/12 |
-| `test_engine` | each trigger converted vs an independent ideal conversion of the 44 140 Hz LXR (SNR below 11 kHz); pitch, level, decay vs the native rate; sequencer timing at 120 BPM; all triggers every 16th with three kits: underruns, clipping | SNR 50-79 dB; kick 49.00/49.00 Hz, 261/261 ms (LXR clocked at 32 kHz instead: 35.8 Hz, 356 ms); beats within one LXR block (1.45 ms) of 500 ms, no drift; 0 underruns, 0 clipped; 32/32 |
-| `test_authentic` | CLATTER 12's C++ engine vs **CLATTER Pocket's own build** (C, double precision, CLATTER's libm), 20 s with six designed kits, all triggers, variations; and the generator, mutation and kit designer vs Pocket's | envelopes within 0.10 dB (95 %), spectra within 0.03 dB per third-octave band; 880/880 patterns, 880/880 mutations, 1440/1440 kits identical; 21/21 |
-| `equiv_c` / `equiv_cxx` | the generated engine text compiled as C and as C++, same scenario | 98 % of samples identical, max 2 LSB, 88.8 dB: C++ picks the `float` overloads of `<math.h>` functions where C promotes to `double` |
-| `test_panel_sim` | **the real panel source** in the simulator: boot, play, playhead, pressure velocity, toggle, hold, variations, pages, copy, length, GEN/MUT/UNDO/redo/CLR, kits while playing | 36/36; panel object 2 728 bytes; writes `build/sim/*.ppm`, `build/sim/session.wav` |
-| `check_api.py` | every Plinky name the glue uses (via the simulator) exists in the published API bundle | 36 names found (`SAMPLE_FREQ` only in Plinky's own example panels) |
-| `block size` (in `test_engine`) | the audio must not depend on the block size: 64 (Plinky), 96 and 128 frames (a browser's audio worklet) render bit-identical audio, with no underruns | passes. **It found a latent bug**: the converter's input buffer (256 frames) was too small for 128-frame blocks and stopped the engine for good; the panel's 64-frame blocks never hit it. Buffer now 512 (2 KB more RAM) |
-| `test_wasm.mjs` (`make test-wasm`) | the browser build `docs/assets/c12.wasm` under node, called as the page calls it: no imports; style and kit names equal the page's; **generator and mutator reproduce the native ones byte for byte (99 of 99 patterns)**; a 5 s scenario (generate, designed kit loaded mid-render, mutate) renders **100% sample-identical** to the native C build (426 dB); the sequencer position moves and returns 255 on stop; runs at 44.1 and 48 kHz | 15/15 |
-| `make m33` | GCC compile for Cortex-M33 + FPv5-SP, three variants, section sizes | compiles; see ARCHITECTURE.md "Memory" |
-| `check_link.py` (in `make m33`) | every math function the engine calls is one Plinky's panels are known to link with, or defined in the engine; M33 objects reference nothing else; **no software double-precision call on the audio path** | expf, sinf, sqrtf (+ mem*) from Plinky; fmaf in the engine; 0 soft-double calls (was ~300 before literals were made float) |
+| `test_resampler` | 44 140 → 32 000 Hz converter: gain, alias rejection, exact long-run rate | 13/13 |
+| `test_engine` | each trigger converted vs an ideal conversion of the 44 140 Hz LXR; pitch, level, decay; sequencer timing; all triggers with three kits: no underruns, no clipping; block-size independence. **CLATTER 12 now makes its own mix** (for the mixer and FX): these checks hold it to Pocket's, and they pass unchanged, to the same figures | 37/37 |
+| `test_authentic` | CLATTER 12's C++ engine vs CLATTER Pocket's own build; generator, mutation and kit designer vs Pocket's | 21/21; 880/880 patterns, 880/880 mutations, 1440/1440 kits identical |
+| `equiv_c` / `equiv_cxx` | the generated engine text as C and as C++ | 97.8 % of samples identical, max 2 LSB, 87.9 dB |
+| `test_panel_sim` | **the real panel source** in the simulator, 127 checks: boot, play, playhead; step on/off/hold, pressure velocity; variations through a held step (keeping its velocity), several held steps at once; **conditions over whole passes** (1:2 over four passes, 4:4 over eight, counted); **ratchets** (4x adds three strokes a pass; an 8-stroke roll); mute and solo silence the output, unmute restores it; lock, length, page view and copy, swing; GEN, MUT, UNDO, REDO, CLR, merged step undo; **page navigation with audio running** (no underruns, the sequencer keeps playing); SOUND rows set real LXR parameters that reach the engine, menus, banks, audition; **kit generation** (new kits differ, are not a cycle, undo/redo exactly, locked sounds keep every parameter, one sound changes only its voice, mutation only its voice); GEN controls, one-track generate changes only that track; **MIX** (fader level 50 is -12 dB in the output, pan writes the LXR pan, sends reach Plinky's send buffers, master 0 silences); **FX** (the LXR drive changes the output, ring, compressor, bits, the LXR rate parameter reaches the engine, routing); **saving and loading** (every step field, the kit, mixer, FX, swing, tempo, generator settings come back; a damaged, truncated, foreign or other-version save is refused and changes nothing; a load starts a fresh undo history); **audio health over 40 s of editing: 0 underruns, 0 clipped samples** | 127/127; panel object 38 600 bytes |
+| `test_wasm.mjs` | `docs/assets/c12panel.wasm` under node, as the page drives it: no imports; boot; audio; a step; a held step edited; **every page reached from row 15, and every pad lit on it has a description**; save, change, load; a foreign file refused; tempo | 24/24 |
+| `make m33` | GCC compile of engine **and panel** (the panel object constructed, as the firmware does) for Cortex-M33 + FPv5-SP, three variants; section sizes | 89 KB code, 27 KB constants, 38 KB static SRAM + 100 KB tables (`_psram`: tables in PSRAM); `_sram` puts 13.5 KB of LXR code in SRAM |
+| `check_link.py` (in `make m33`) | math functions only from Plinky's known set or defined in the engine; no software double precision | `logf` and `fmodf` (the LXR compressor and fold distortion) are defined in the engine, as `fmaf` was; 0 soft-double calls anywhere. The Plinky API names are checked against `sim/plinky_sim.h` when the published bundle cannot be fetched (it could not be from this session: plinky12.com is outside its network) |
+| `make m33-bench` | instructions per 2 ms output block on a Cortex-M33 in QEMU (below) | see "CPU" |
+| `check_api.py` | the Plinky names the glue uses exist in the published API bundle | **not run** this session (bundle not fetchable here); run `tools/fetch-plinky-headers.sh` then `make test` |
+
+## CPU
+
+**Not measured on a Plinky.** Three sources, in order of trust:
+
+1. **On the device**: the DSP settings page (right side button up from SEQ) and the log line every 2 s
+   (`c12 dsp avg … max … us (lxr … mix … rs …)`) time each `on_dsp` and each stage with `time_us()`.
+   This is the number that decides. Not yet available.
+2. **Plinky's IDE emulator**: `time_us()` does not advance within an audio block there, so the readout
+   was 0. The DSP page now says `n/a` in that case instead of 0 %.
+3. **QEMU's Cortex-M33 model** (`make m33-bench`, mps2-an505, `-icount`): the engine as C, compiled by
+   GCC for the M33 with its FPU, everything in RAM, counting the instructions each 64-frame output block
+   executes. Instructions are not cycles: on the RP2350 most instructions take one cycle, but loads,
+   branches, divides and especially flash (XIP cache misses) and PSRAM add more. So these are **lower
+   bounds** on cycles; a realistic factor is 1.2-1.6.
+
+| Instructions per 2 ms block (QEMU, Cortex-M33) | mean | busiest | LXR + seq | mix/FX | convert |
+|---|---|---|---|---|---|
+| previous version (before this work) | 160 900 | 232 800 | | | |
+| stopped, silent | 168 400 | 243 800 | 119 900 | 13 000 | 35 500 |
+| playing, all seven tracks every 16th | 177 100 | 266 900 | 128 100 | 13 400 | 35 500 |
+| all tracks, 4x ratchets, 300 BPM | 186 800 | 267 500 | 136 900 | 14 400 | 35 500 |
+| + sends and a level change (the full mixer) | 192 200 | 274 700 | 128 600 | 25 300 | 38 400 |
+| + LXR drive | 206 400 | 295 900 | 128 000 | 39 900 | 38 400 |
+| + LXR ring modulator | 214 500 | 307 500 | 128 100 | 48 000 | 38 400 |
+| + LXR compressor (the whole chain) | 240 500 | 345 200 | 128 100 | 73 900 | 38 400 |
+| compressor alone | 220 300 | 315 900 | 128 100 | 53 800 | 38 400 |
+
+The "busiest" block is one in which two LXR blocks are rendered (1.379 a block on average, so about
+four blocks in ten). At 150 MHz a block is 300 000 cycles. So, as lower bounds: the default engine
+uses **56 % of core 1 on average and 81 % in its busiest blocks**; with all three LXR effects, 80 % and
+115 %. With a realistic 1.2-1.6 cycles per instruction the default busiest block is at or past the
+budget unless Plinky clocks core 1 above 150 MHz or buffers more than one block. The new mixer, limiter
+and ratchet machinery cost 4.7 % over the previous version (CLATTER 12's own mix is skipped when the
+mixer is neutral, and its integer stages are one `SMULL` each where Pocket's are 64-bit library calls).
+
+What this means: the CPU question raised in FEASIBILITY.md is now sharper, not answered. The effects
+are off by default and cost nothing when off. If the device measurement shows overruns, the order of
+things to try is in ROADMAP.md (LXR code in SRAM is the prepared first step).
+
+Host timing in the simulated session (x86-64, this container, NOT predictive): `on_dsp` mean 23 µs per
+2000 µs block.
 
 ## Authenticity
 
@@ -27,9 +71,12 @@ and spectrum, with sample SNR printed for information.
 
 ## The simulator is not Plinky
 
-`sim/plinky_sim.*` is written from Plinky's documentation: one finger per pad, no slides, no
-debounce, instant transport, approximate palette, `time_us` advancing with simulated audio (so the
-DSP page reads 0 % there). It shows that CLATTER 12's logic does what it should given the documented
+`sim/plinky_sim.*` is written from Plinky's documentation and from published community panels: one
+finger per pad, fingers are physical (a page change shows the same finger on the new page, with its
+original touch origin), pages stacked vertically as Plinky's, a JSON serialiser with Plinky's
+`OBJECT_BEGIN`/`FIELD`/`FIELD_BASE64` shape, a staged load (fresh panel, `on_prepare_staged_load`,
+read, then copied over the live one) as Plinky does it, no slides, no debounce, instant transport,
+approximate palette, `time_us` advancing with simulated audio (so the DSP page reads `n/a` there). It shows that CLATTER 12's logic does what it should given the documented
 API. It cannot show how Plinky's real touch scanning, timing, LEDs or audio behave.
 
 ## In Plinky's IDE (2026-11-04, by the owner)
@@ -51,7 +98,10 @@ What the emulator log shows (owner's run, about four minutes of playing and one 
   nothing about CPU load until the panel runs on a device. The cause is not confirmed.
 - **Clipping: 17 saturated samples in about four minutes**, starting when the owner began editing
   (the engine's 16-bit stage, before Plinky's output chain). The host session and tests had none.
-  Not yet addressed: more headroom or a soft limiter (ROADMAP).
+  **Addressed since**: the master keeps its 3 dB of headroom and an output limiter now follows the
+  mix (peak follower, instant attack, 80 ms release, threshold -1 dBFS so the converter's ringing
+  stays below full scale). With nothing near full scale it multiplies by exactly 1 (the engine tests'
+  figures are unchanged); the 40 s simulated editing session, all FX included, clips 0 samples.
 - The `failed to open json preset file /PLINKY/BANKS/...` lines are the stock Blocks panel looking
   for sound banks missing from the emulator's disk image. They are not CLATTER 12's.
 
@@ -59,19 +109,27 @@ This log does not say how it sounded or whether touches and LEDs behaved: not ye
 
 ## The browser demo
 
-The project page's sound is the same engine, so the tests above cover it, and `test_wasm.mjs` covers the build itself. In a real browser (Chromium, 2026-11-04, via the app's browser pane) the page was driven end to end: a real click starts the audio context at 32 kHz, the engine reports ready, the playhead follows the engine's sequencer through all 16 steps, GEN produced a new pattern at the current length, KIT, MUT, mute and STOP behaved, and the level meter showed peaks of 0.45 to 0.92 of full scale. Not tested: Firefox and Safari, and listening on real speakers.
+The page runs the panel itself (`sim/wasm_panel.cpp`: the generated panel file and the simulator, compiled to
+WebAssembly), so the panel tests above cover what it does and `test_wasm.mjs` covers the build. In headless Chromium
+(Playwright, 2026-11-04) the page was driven end to end: the panel boots silent on the page's thread; the first tap starts
+an AudioWorklet at 32 kHz, the project moves into it (saved and loaded with the panel's own serialiser), the tapped step
+lights, PLAY plays (level meter peaks about 0.6 of full scale), each of the six page pads changes page with the row labels
+following, no page errors; no horizontal scrolling at 390 px wide. Not tested: Firefox and Safari, a real touch screen,
+and listening on real speakers. The previous version was tested in a real Chromium the same way (2026-11-04).
 
 ## Untested
 
-Whether it sounds and plays right in the emulator (not reported), and anything on a Plinky 12.
-Specifically core-1 CPU load, linking beside
+This version in Plinky's emulator (the first version ran there), and anything on a Plinky 12. Also:
+Plinky's real serialiser and save page with CLATTER 12's field (only the simulator's stand-in, written
+from the published panels' usage, has read and written it), page scrolling on the device, and whether
+Plinky's delay and reverb process the sends as the API describes. Specifically core-1 CPU load, linking beside
 the firmware (static SRAM), PSRAM table speed, the IDE's source-size limit and compiler flags,
 touch latency, LED update cost, `SAMPLE_FREQ`'s actual value, transport behaviour with external
 clock, and audio level through Plinky's output stage.
 
 ## On a device (first session)
 
-1. `clatter_12.cpp` in the IDE emulator: default beat plays; edit, GEN, KIT.
+1. `clatter_12.cpp` in the IDE emulator: default beat plays; every page; edit, GEN, NEW KIT; save to a slot, load it.
 2. Flash; note link errors (then try `clatter_12_psram.cpp`).
 3. DSP page and log: mean/max µs per block idle, playing all tracks, while loading a kit.
    Over ~1800 µs max means crackle; try `clatter_12_sram.cpp`.

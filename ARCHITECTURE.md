@@ -7,15 +7,22 @@
                                                          while converter needs input:
                                                            pocket_lxr_render_q23 (64 frames @ 44 140 Hz)
                                                              ├ drain ≤ 32 queued events
-                                                             ├ pocket_seq_block (the sequencer)
-                                                             └ LXR-02 voices, pan, DC block
+                                                             ├ block hook: pocket_seq_block, then the
+                                                             │   step's hits and ratchet strokes
+                                                             └ LXR-02 voices (each kept per block)
+                                                           mix_block: level/mute/solo, sends,
+                                                             LXR FX (drive, ring, comp) on routed
+                                                             tracks, master, DC block, bits, limiter
                                                          c12_rs_process  44 140 → 32 000 Hz
           mix_buffers.dry ◀──────────────────────────── int16 stereo
-          Plinky mix/output (level, EQ)
- core 0  UI ~250 fps ────────────────── on_ui ───────▶ touches → pocket_seq_set_cell / edit_begin+commit
+          mix_buffers.delaysend/reverbsend ◀──────────── sends (linear 44 140 → 32 000 Hz)
+          Plinky mix/output (level, EQ, delay, reverb)
+ core 0  UI ~250 fps ────────────────── on_ui ───────▶ pages: touches → pocket_seq_set_cell / edit_begin+commit,
+                                                         c12_kit_set_target, c12_mix_*, c12_fx_set
                                                         transport/tempo → pocket_seq_play / set_tempo
                                                         kits → c12_kit_pump → event ring
-                                                        LEDs ← pocket_seq_pattern / position
+                                                        LEDs ← pattern, kit, mixer, meters
+                                                        on_serialise ↔ the project (save page)
 ```
 
 ## Layers
@@ -25,9 +32,9 @@
 | LXR-02 firmware DSP, unchanged | `third_party/clatter-pocket/lxr/upstream` | nothing |
 | CLATTER's shim and parameter handler | `…/lxr/shim`, `…/lxr/bridge/lxr_params.c` | nothing platform-specific |
 | CLATTER Pocket's engine host, sequencer, generator, kit designer | `…/engine/pocket_lxr.c`, `…/seq/*.c` | the layers above |
-| CLATTER 12 core: rate conversion, engine wrapper, kit streaming | `core/` | Pocket's APIs |
+| CLATTER 12 core: rate conversion, engine wrapper (mix, FX, limiter, ratchets), kit streaming, LXR parameter table, kit generation and mutation | `core/` | Pocket's APIs, the LXR's FX code |
 | Plinky glue | `panel/clatter12.cpp` | core + public Plinky API |
-| Simulator (host only) | `sim/` | the Plinky API, as documented |
+| Simulator (host, and WebAssembly for the page) | `sim/` | the Plinky API, as documented and as published panels use it |
 
 Plinky-specific code is one file. The portable part is Pocket's, reused through a pinned submodule
 with no edits; CLATTER 12 adds only what the Plinky needs (`core/`). A shared library extracted from
@@ -50,6 +57,29 @@ The same two contexts as Pocket's (see `pocket_lxr.h`), mapped onto the Plinky:
   Plinky's transport (play/stop) and tempo (polled each UI frame); it is not phase-locked to Plinky's
   clock yet (roadmap: drive Pocket's external-clock input from Plinky's `clock_phase`).
 
+## CLATTER 12's mix
+
+Pocket mixes the six voices itself and keeps each voice's block for inspection
+(`pocket_lxr_voice_block`). CLATTER 12 re-mixes those blocks in `mix_block` (`core/c12_engine.c`)
+with Pocket's pan law, int16 conversion, master gain and DC blocker, to the bit, so the mixer and
+FX can sit inside the mix without touching Pocket. When the mixer is neutral and no FX are on it
+takes Pocket's own mix of the block instead (the same numbers), which keeps the default cost low.
+Levels ramp over a block; mute and solo also hold back the sequencer's triggers (`seq_emit`), so a
+muted closed hat cannot choke an open one. The hats are one voice; its level and pan follow the hat
+track that last played it. Sends are built per voice and converted linearly to the output rate for
+Plinky's delay and reverb. The FX chain is the LXR firmware's `DSPAudio/FX` master distortion, ring
+modulator and compressor, unchanged (the amalgamator adds them; the FX bus and its 64 KB delay stay
+out), run in 32-frame chunks because they keep their working buffers on the stack. Then bit
+reduction and a limiter (peak follower, instant attack, -1 dBFS) before the converter.
+
+## Ratchets
+
+Pocket's cell is 32 bits and uses bits 0-19; CLATTER 12 keeps a step's ratchet in bits 20-26
+(strokes, spacing, velocity run), which Pocket's sequencer ignores. The sequencer's emit callback
+only notes what a step plays; the block hook (`block_hook`), right after `pocket_seq_block` in the
+same LXR block, triggers it and schedules the remaining strokes in Pocket's own phase units, so they
+follow tempo and swing and are placed at LXR block resolution, as steps are.
+
 ## Rate conversion
 
 The LXR's coefficients assume 44 140 Hz, and much of its timing is per sample (envelopes, filter
@@ -61,16 +91,18 @@ than needed, `underruns` counted). About 4 100 multiply-adds per output block (n
 
 ## Memory
 
-| | Size (GCC, Cortex-M33) | Where |
+| | Size (GCC 13, Cortex-M33, engine and panel) | Where |
 |---|---|---|
-| code | 51 KB (`clatter_12_sram.cpp`: 33 KB flash + 9.4 KB SRAM) | flash / `.time_critical` SRAM |
-| constants (packed tables, kit recipes, styles, param table) | 21 KB | flash |
-| LXR tables, unpacked | 102 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
-| other static state (voices, event ring, patterns, converter) | 30 KB | static SRAM |
-| panel object | 2.7 KB | Plinky's 128 KB panel arena |
+| code | 89 KB (`clatter_12_sram.cpp`: 68 KB flash + 13.5 KB SRAM) | flash / `.time_critical` SRAM |
+| constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
+| LXR tables, unpacked | 100 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
+| other static state (voices, event ring, patterns, converter, mix and send buffers) | 38 KB | static SRAM |
+| panel object (UI state, the kit, 16 undo snapshots, the project) | 38.6 KB | Plinky's 128 KB panel arena |
+| source file | 403 KB (`--compact`) | the IDE |
 
-Nothing large is on the stack (the converter's coefficient row is static; the docs ask for < 128
-bytes per object). No allocation anywhere.
+Nothing large is on the stack in CLATTER 12's code (mix buffers are static; the LXR FX's own stack
+buffers are kept to 128 bytes by running them 32 frames at a time). No allocation anywhere. The
+undo history lives in the panel object, where there is room, not in static SRAM, where there may not be.
 
 ## The amalgamation (`tools/amalgamate.py`)
 
@@ -92,11 +124,13 @@ compares the result with Pocket's own build of the same files.
 
 ## The web build
 
-`docs/` (GitHub Pages) runs the same engine text in the browser. `core/c12_wasm.c` is a thin export layer; it and
-the generated engine text (`build/c12_engine_c.c`) and CLATTER's libm shim build to one 89 KB module
-(`make wasm`: a wasm32 clang and `wasm-ld`). Two instances are used: one inside an AudioWorklet
-(`docs/assets/c12-worklet.js`: render 128-frame quanta, kit streamed 48 parameters a quantum as the panel's `on_ui`
-does, sequencer position reported to the page), and one on the main thread that only runs the generator for GEN and
-MUT. The page (`docs/assets/site.js`) keeps the pattern as the sequencer's own 32-bit cells and mirrors every
-edit into the engine. The audio context asks for 32 kHz, the panel's rate; a browser that refuses gets the engine
-at its own rate through the converter, which now also converts up.
+`docs/` (GitHub Pages) runs the panel itself. `sim/wasm_panel.cpp` includes the simulator's API
+(`sim/plinky_sim.h`) and the generated panel file (`build/clatter_12_full.cpp`, the same text as the
+one pasted into Plinky's IDE) and exports what a host needs: touches, one UI frame (two 64-frame
+audio blocks and `on_ui`), LEDs, audio, page and tempo, save and load through `on_serialise`, and
+the pad descriptions of `sim/panel_help.h`. A freestanding C library (`sim/wasm/`) and CLATTER's
+libm make it one module with no imports (`make wasm` → `docs/assets/c12panel.wasm`). The page runs it
+on its own thread until sound is started, then moves it, with its project, into an AudioWorklet
+(`docs/assets/c12-worklet.js`), which runs one UI frame per 4 ms of audio and sends LEDs back. So
+the controls are not re-implemented in JavaScript: the page draws the panel's LEDs and sends it
+touches. It is still not a Plinky (TESTING.md, "The simulator is not Plinky").

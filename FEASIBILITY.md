@@ -91,6 +91,13 @@ modified; CLATTER 12 reuses it as is.
   core 1.
 - The panel measures itself: the **DSP settings page** (right-up button, above page 0) shows the
   core-1 load, and the log prints mean/max µs per block every 2 s. The first hardware run answers it.
+- **Update 2026-11-04: QEMU's Cortex-M33 model** (`make m33-bench`, TESTING.md "CPU") counts the
+  instructions the engine executes per 2 ms block: 168 000 on average and 244 000 in the busiest block
+  (when two LXR blocks are rendered), of which the LXR voices and sequencer are about 120 000-137 000
+  per block and the converter 35 000. Instructions are a lower bound on cycles. At 150 MHz (300 000
+  cycles a block) that is at least 56 % and 81 %. So the guess above (25-65 %) was optimistic: the
+  busiest blocks are likely at or over budget unless core 1 runs faster, output is buffered more than
+  one block, or the mitigations below are needed. Still to be measured on a device.
 
 If it does not fit, in order (all keep the LXR's synthesis): LXR per-sample code in SRAM (prepared
 variant `clatter_12_sram.cpp`), tables in SRAM rather than PSRAM, skip silent voices (Pocket notes

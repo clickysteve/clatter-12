@@ -16,36 +16,42 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 > either. It contains a modified version of the LXR-02 firmware's sound engine. "Erica Synths",
 > "LXR" and "LXR-02" are trademarks of Erica Synths.
 
-![The grid in CLATTER 12's simulator: boot, playing, edited, generated, new kit](docs/images/grid_sheet.png)
+![CLATTER 12's pages in its simulator: SEQ (with a step selected), SOUND, GEN, MIX, FX](docs/images/grid_sheet.png)
 
 ## Status
 
 | | |
 |---|---|
 | Feasibility | **Positive**: Plinky panels are native code with a core-1 audio callback. [FEASIBILITY.md](FEASIBILITY.md) |
-| LXR engine | all six voices / seven triggers, Pocket's kits, variations, generator; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
-| Sound, host | matches CLATTER Pocket's reference build: every voice's spectrum within 0.03 dB per third-octave band, envelopes within 0.1 dB (95 % of 10 ms frames); 32 kHz output matches an ideal conversion of the native-rate LXR at 50-79 dB SNR |
-| Panel, simulated | 16-step grid for seven tracks with pressure velocity, variation lanes, four pages with copy, length 16-64, GEN / MUT / KIT / STYLE / UNDO / CLR, play/stop with Plinky's transport and tempo: 36 scripted checks pass |
-| Browser demo | **plays**: the engine, sequencer and generator as WebAssembly, in an AudioWorklet at 32 kHz. Audio matches the native build sample for sample; the generator matches it byte for byte (99 patterns). [Page](https://clickysteve.github.io/clatter-12/) |
-| Plinky IDE emulator | **compiles, links, boots and runs** (owner's Test, 2026-11-04): engine up at 32 kHz, no underruns over ~4 min. The timing readout is 0 there, so CPU load is still unknown; 17 clipped samples while editing |
-| Cortex-M33 | compiles with GCC 8.5 (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`): 51 KB code, 21 KB constants, 132 KB static SRAM (33 KB with tables in PSRAM). Not linked against Plinky's firmware (not public) |
-| On a Plinky 12 | **never run.** CPU load on core 1 is the open question; the panel measures it on its DSP page |
-| Saving, MIDI, CV | not yet (roadmap) |
+| LXR engine | all six voices / seven triggers, unchanged; the LXR firmware's own drive, ring modulator and compressor; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
+| Sound, host | matches CLATTER Pocket's reference build: every voice's spectrum within 0.03 dB per third-octave band; CLATTER 12's own mix is Pocket's to the bit when the mixer is neutral |
+| Panel, simulated | five pages (SEQ, SOUND, GEN, MIX, FX) and Plinky's save page: 127 scripted checks pass in CLATTER 12's simulator of the Plinky API |
+| Browser demo | **runs the panel itself**: the firmware source compiled to WebAssembly with the simulator, so the page's grid is the panel's interface. [Page](https://clickysteve.github.io/clatter-12/) |
+| Cortex-M33 | compiles with GCC (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`), engine and panel: 89 KB code, 27 KB constants, 38 KB static SRAM + 100 KB LXR tables (SRAM or PSRAM); panel object 38 KB of the 128 KB arena. Not linked against Plinky's firmware (not public) |
+| CPU, estimated | QEMU's Cortex-M33 model: **168 000 instructions per 2 ms block on average, 244 000 in the busiest** (two LXR blocks); FX add up to 72 000. At 150 MHz that is at least 56 % / 81 % of core 1 before wait states. **Not a measurement of a Plinky** (TESTING.md) |
+| Plinky IDE emulator | the first version **compiled, linked and ran** (2026-11-04); this version not yet tried there |
+| On a Plinky 12 | **never run** |
+| MIDI, CV | not yet (roadmap) |
 
-**Project page:** https://clickysteve.github.io/clatter-12/ (source in `docs/`). A working model of the grid in
-CLATTER Pocket's style that **plays**: the page runs the panel's engine, sequencer and CLATTER's generator as
-WebAssembly in your browser (`docs/assets/c12.wasm`, built by `make wasm`, checked by `make test-wasm`). It is
-not a Plinky: no Plinky output stage, pressure or CPU limit. Run it locally with `make site-serve`.
+**Project page:** https://clickysteve.github.io/clatter-12/ (source in `docs/`). The page runs CLATTER 12's panel
+source (engine and Plinky glue, exactly the file pasted into Plinky's IDE) with CLATTER 12's simulator of the Plinky API,
+compiled to WebAssembly (`docs/assets/c12panel.wasm`, `make wasm`, checked by `make test-wasm`). It is an interface
+demonstration, not a Plinky: no pressure sensor, no Plinky delay or reverb, no CPU limit. `make site-serve` runs it locally.
 
 ## Playing it (as designed; simulated)
 
-| Grid | |
+Six pages, Plinky's own (the right side buttons scroll them); row 15's first six pads jump to one. Row 15 is the same
+on every page: `SEQ SND GEN MIX FX SAV | page's own | UNDO REDO STOP PLAY`.
+
+| Page | |
 |---|---|
-| rows 1-7 | DRUM 1, DRUM 2, DRUM 3, SNARE, CYMBAL, CL HAT, OP HAT. Tap: step on, as loud as you press. Tap a lit step: off. Hold a lit step: re-take its velocity |
-| row 8 | playhead |
-| rows 9-15 | variation lane under each track: tap under a lit step to cycle none / A / B (DRUM 3 and SNARE: also their second sound and its A / B) |
-| row 16 | pages 1-4 (hold one, tap another: copy) · length 16/32/48/64 · GEN · MUT · KIT · STYLE · UNDO · CLR (hold) · STOP · PLAY |
-| side buttons | Plinky's: tempo (left), pages (right; up = CLATTER 12's DSP load page) |
+| SEQ | rows 0-6: the seven LXR triggers' steps. **Tap** an empty step: on, as loud as you press. **Tap** a lit step: off. **Hold** a lit step: it stays, and rows 8-11 edit it: variation, condition (ALWAYS, 1:2 … 4:4, 25/50/75 %), ratchet (1-8 strokes), roll spacing and velocity run, exact velocity. Row 12 mute and solo, 13 lock and audition, 14 view page (hold + tap: copy), length, swing; 15 GEN, MUT, STYLE, CLR (hold) |
+| SOUND | one voice's LXR parameters, a row each, value across the row, `-`/`+` at the end; banks SOURCE, SHAPE, MOD; audition, new sound, mutate sound, lock sound |
+| GEN | style, density, complexity, mutation strength, track locks, one-track generate; kit character, wildness, mutation amount, sound locks, new sound / mutate sound per voice, NEW KIT, MUTATE KIT |
+| MIX | strips for the seven tracks and the master: mute, solo, an 8-row fader with fine `-`/`+`, pan, delay and reverb sends into Plinky's effects, meters; the master's limiter |
+| FX | routing per track; the LXR's drive (TUBE, FOLD, RAT), ring modulator and compressor; bit reduction; the LXR's sample-rate reduction |
+| SAVE | Plinky's save/load page: the whole project in a song slot |
+| side buttons | Plinky's: tempo (left), pages (right; up from SEQ = CLATTER 12's DSP load page) |
 
 Interface design and rationale: [docs/DESIGN.md](docs/DESIGN.md).
 
@@ -74,10 +80,12 @@ Tests and what they do and do not show: [TESTING.md](TESTING.md).
 ## Layout
 
 ```
-core/             CLATTER 12's portable C: engine wrapper, 44.1 -> 32 kHz converter
+core/             CLATTER 12's portable C: engine wrapper (mix, FX, ratchets), 44.1 -> 32 kHz converter,
+                  LXR parameter table, kit generation and mutation
 panel/            the Plinky glue (C++, the public panel API only)
-sim/              a host stand-in for the Plinky API (NOT Plinky's emulator)
-tests/            engine, converter, authenticity, C/C++ equivalence, simulated panel, bench
+sim/              a host stand-in for the Plinky API (NOT Plinky's emulator); its WebAssembly build for the page
+tests/            engine, converter, authenticity, C/C++ equivalence, simulated panel, WebAssembly, bench,
+                  Cortex-M33 instruction counts in QEMU (tests/m33)
 tools/            amalgamator, panel assembler, API check, size report
 stubs/sysinc/     empty C library headers for the amalgamation
 third_party/      clatter-pocket (submodule, pinned; unmodified)
