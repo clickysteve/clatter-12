@@ -13,6 +13,12 @@ and nothing has been flashed.
 3. Make the DSP load readout work (it reads 0 in the emulator). It decides whether seven voices fit.
 4. Then ROADMAP.md section 2 onward.
 
+**Project page.** `docs/` is a GitHub Pages site (CLATTER Pocket's visual language): an interactive
+model of the 16 x 16 grid (`docs/assets/site.js` mirrors the panel's behaviour in `panel/clatter12.cpp`;
+keep them in step), real generator patterns, and four engine-rendered clips. `make site-data` regenerates
+`docs/assets/data.js` and the audio (needs ffmpeg); the output is committed. When the panel's interface
+changes, update the page's descriptions and behaviour too. The page makes no sound of its own and says so.
+
 **How things connect**
 - `third_party/clatter-pocket` is a pinned, unmodified submodule: the LXR engine, sequencer,
   generator and kit designer. Never edit it here; change it in its own repo and bump the pin.

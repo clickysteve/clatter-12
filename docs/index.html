@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLATTER 12</title>
+<meta name="description" content="CLATTER's LXR drum synthesis and generative sequencer as a native Plinky 12 custom panel. Experimental: runs in Plinky's emulator, not yet on a Plinky 12.">
+<meta property="og:title" content="CLATTER 12">
+<meta property="og:description" content="Seven voices of authentic LXR drum synthesis on the Plinky 12's 16 x 16 pressure grid. Experimental: emulator only.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' shape-rendering='crispEdges'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Cg fill='%23ff9a1f'%3E%3Crect x='2' y='2' width='4' height='4'/%3E%3Crect x='10' y='2' width='4' height='4'/%3E%3Crect x='2' y='10' width='4' height='4'/%3E%3C/g%3E%3Crect x='10' y='10' width='4' height='4' fill='%23f4f4f0'/%3E%3C/svg%3E">
+<link rel="preload" href="assets/fonts/silkscreen-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script src="assets/data.js" defer></script>
+<script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<p class="strip" role="status"><b>EXPERIMENTAL</b> <span>CLATTER 12 compiles, links and runs in Plinky's emulator. It has not run on a Plinky 12.</span> <a href="https://github.com/clickysteve/clatter-12">GITHUB ↗</a></p>
+
+<header class="top">
+  <a class="brand" href="#main">CLATTER 12</a>
+  <nav aria-label="Site">
+    <a href="#grid">The grid</a><a href="#hear">Hear it</a><a href="#what">What it is</a><a href="#status">Status</a><a href="#try">Try it</a><a href="https://github.com/clickysteve/clatter-12">Source</a>
+  </nav>
+</header>
+
+<main id="main">
+<section class="hero" aria-labelledby="h-title">
+  <h1 id="h-title" class="title">CLATTER <i>12</i></h1>
+  <p class="sub">The CLATTER drum machine, native to the Plinky 12.</p>
+  <p class="lede">Seven voices of authentic LXR drum synthesis, a generative sequencer, and a 16 × 16 grid of pressure-sensitive pads. One custom panel, built into Plinky's own firmware.</p>
+  <div class="cta">
+    <a class="button primary" href="#grid">PLAY THE GRID</a>
+    <a class="button" href="#hear">HEAR THE ENGINE</a>
+    <a class="link" href="https://github.com/clickysteve/clatter-12">VIEW SOURCE ON GITHUB ↗</a>
+  </div>
+</section>
+
+<section id="grid" aria-labelledby="h-grid">
+  <h2 id="h-grid" class="section"><span>01</span> The grid</h2>
+  <p class="intro">This is the instrument's whole interface, drawn as the Plinky's pads look when lit. The pads work: build a pattern, press <b>PLY</b> and watch the playhead run. Hover or tap anything to read what it does. This page makes no sound; the engine's sound is in the clips further down.</p>
+  <div class="guide">
+    <div class="stage">
+      <div class="board faceplate" id="board">
+        <div class="plinky" id="plinky">
+          <div class="rows" id="rows" aria-hidden="true"></div>
+          <div class="panel-face"><div id="pads" role="group" aria-label="The 16 by 16 pad grid"></div></div>
+          <button class="side l a" id="tempo-up" type="button" aria-label="Tempo up (left side button, top)"></button>
+          <button class="side l b" id="tempo-down" type="button" aria-label="Tempo down (left side button, bottom)"></button>
+          <button class="side r a" id="page-up" type="button" aria-label="Page up (right side button, top)"></button>
+          <button class="side r b" id="page-down" type="button" aria-label="Page down (right side button, bottom)"></button>
+        </div>
+      </div>
+      <p class="lcd" id="lcd" role="status" aria-live="polite"></p>
+      <div class="tools">
+        <label>PRESSURE <input id="pressure" type="range" min="0" max="100" value="85" aria-label="Pressure used when a step is entered or re-taken"><output id="pressure-out">VEL 113</output></label>
+        <button class="chip" id="face" type="button" aria-pressed="true">FACEPLATE</button>
+        <button class="chip" id="reset" type="button">RESET BEAT</button>
+      </div>
+      <p class="fine">A mouse has one pressure, so the slider stands in for how hard you press (a pen uses its real pressure). Holding a page pad and tapping another copies the page: on a touch screen use two fingers; with a mouse, <kbd>Shift</kbd>-click the first page pad to hold it. <b>GEN</b> and <b>MUT</b> replay patterns recorded from CLATTER's own generator. The panel makes them live and mutates whatever you've edited. Drawn from the Plinky 12's published layout (16 × 16 pads, four side buttons), not from a photograph.</p>
+    </div>
+    <aside class="readout" id="readout" aria-live="polite" aria-label="What the selected pad does">
+      <p class="readout-name" id="ro-name">READOUT</p>
+      <p class="readout-kind" id="ro-kind"></p>
+      <p class="readout-does" id="ro-does">Hover or tap a pad.</p>
+      <p class="readout-try" id="ro-try"></p>
+    </aside>
+  </div>
+</section>
+
+<section id="hear" aria-labelledby="h-hear">
+  <h2 id="h-hear" class="section"><span>02</span> Hear the engine</h2>
+  <p class="intro">Each clip is CLATTER 12's engine rendering a pattern from CLATTER's generator with one of its designed kits: the same code the panel contains, run on a desktop at the Plinky's 32 kHz. They are not recordings of a Plinky, and the level is normalised.</p>
+  <div class="clips" id="clips"></div>
+</section>
+
+<section id="what" aria-labelledby="h-what">
+  <h2 id="h-what" class="section"><span>03</span> What it is</h2>
+  <div class="windows">
+    <article class="window wide">
+      <h3 class="tab">Authentic LXR synthesis</h3>
+      <p>The sound engine of Erica Synths' LXR-02 drum machine, unchanged, as in <a href="https://github.com/clickysteve/clatter">CLATTER</a> and <a href="https://github.com/clickysteve/clatter-pocket">CLATTER Pocket</a>. It runs at its own 44.14 kHz and is converted to the Plinky's 32 kHz, so pitch and decay stay exactly as the LXR makes them. It is not Plinky's synth with a new name.</p>
+      <p class="tags">6 VOICES · 7 TRIGGERS · VARIATIONS</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">A Plinky custom panel</h3>
+      <p>One C++ file written for Plinky's public panel API. Plinky's IDE builds it into the firmware; nothing is replaced and the stock panels stay.</p>
+      <p class="tags">NATIVE · RP2350 · NO FIRMWARE SWAP</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">Generative sequencing</h3>
+      <p>Eleven rhythm styles, mutation, and sixteen designed kits, all from CLATTER. Up to 64 steps on four pages.</p>
+      <p class="tags">GEN · MUT · KIT · UNDO</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">Built for the pads</h3>
+      <p>Seven drum rows with a variation lane under each. How hard you press a step sets its velocity, and brightness shows it.</p>
+      <p class="tags">PRESSURE · RGB · 16 × 16</p>
+    </article>
+  </div>
+</section>
+
+<section id="status" aria-labelledby="h-status">
+  <h2 id="h-status" class="section"><span>04</span> Status</h2>
+  <div class="notice">
+    <span class="notice-head">UNVERIFIED</span>
+    <p class="notice-body">Nothing here has run on a Plinky 12. The emulator and the desktop tests are the evidence so far.</p>
+  </div>
+  <div class="scroll" style="margin-top:22px">
+    <table>
+      <thead><tr><th>Where</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><th>Desktop tests</th><td class="ok"><b>Pass.</b> The engine matches CLATTER Pocket's reference build (spectra within 0.03 dB per band), the 32 kHz conversion is clean, and 3,200 of 3,200 generated patterns and kits are identical to Pocket's.</td></tr>
+        <tr><th>Cortex-M33 compile</th><td class="ok"><b>Compiles</b> for the RP2350's core with GCC. About 51 KB of code, 21 KB of constants, no software double-precision on the audio path.</td></tr>
+        <tr><th>Plinky's emulator</th><td class="ok"><b>Compiles, links, boots and runs</b> with no audio underruns over four minutes. The CPU readout shows 0 there, and 17 samples clipped while editing.</td></tr>
+        <tr><th>A Plinky 12</th><td class="no"><b>Never run.</b> CPU load on the audio core is the open question: it decides whether all seven voices fit.</td></tr>
+        <tr><th>Saving, MIDI, CV</th><td class="no"><b>Not built yet.</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="try" aria-labelledby="h-try">
+  <h2 id="h-try" class="section"><span>05</span> Try it</h2>
+  <p class="intro">You need a computer and Plinky's code editor. No hardware.</p>
+  <ol class="steps">
+    <li>Get the source: <code>git clone --recurse-submodules https://github.com/clickysteve/clatter-12</code></li>
+    <li>Build the panel and run the tests: <code>make</code>. It writes <code>build/clatter_12.cpp</code>.</li>
+    <li>Open <a href="https://plinky12.com/codeed.html">Plinky's code editor</a> (closed beta: access comes from their Discord), paste the file into a new tab, press <b>Test</b>.</li>
+    <li>Play: <b>PLY</b> starts the beat, a hard press makes a loud step, the lane under a step cycles its variation, <b>GEN</b> and <b>KIT</b> change the pattern and the sound.</li>
+  </ol>
+  <pre>git clone --recurse-submodules https://github.com/clickysteve/clatter-12
+cd clatter-12
+make            # builds build/clatter_12.cpp and runs every host test</pre>
+  <p class="fine">Don't flash a Plinky with it yet. The project's rules: no hardware claims without a device, and nothing touches the bootloader.</p>
+</section>
+</main>
+
+<footer class="foot">
+  <p>CLATTER 12 is free software under the GNU GPL version 3 only, with the LXR-02 firmware's additional terms. It contains a modified version of the Erica Synths LXR-02 firmware's sound engine. "Erica Synths", "LXR" and "LXR-02" are trademarks of Erica Synths; "Plinky" and "Plinky 12" name the hardware it targets. CLATTER 12 is an independent project, not made, approved or endorsed by either. <a href="https://github.com/clickysteve/clatter-12/blob/main/NOTICE.md">Notices</a> · <a href="https://github.com/clickysteve/clatter-12">Source</a> · Fonts: Silkscreen and IBM Plex Sans, SIL OFL (<a href="assets/fonts/OFL-Silkscreen.txt">1</a>, <a href="assets/fonts/OFL-IBM-Plex.txt">2</a>).</p>
+</footer>
+</body>
+</html>

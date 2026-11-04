@@ -33,7 +33,7 @@ CXXFLAGS_HOST := -std=gnu++17 -O2 -ffp-contract=off -Wall -Wno-unused-function -
 M33_FLAGS := -std=gnu++17 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 \
 	-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wno-psabi
 
-.PHONY: all panel test m33 bench pocket-test clean
+.PHONY: all panel test m33 bench pocket-test site-data site-serve clean
 all: panel test
 
 $(BUILD)/c12_engine.inc $(BUILD)/c12_engine_c.c: $(GEN_DEPS)
@@ -107,6 +107,20 @@ m33: $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 	done
 	$(PY) tools/m33_sizes.py $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 	$(PY) tools/check_link.py $(BUILD)/c12_engine.inc $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
+
+# The project page (docs/, GitHub Pages) uses real output of CLATTER's generator and of this engine.
+# The generated files are committed, so the page needs no build; this regenerates them (needs ffmpeg).
+$(BUILD)/export_patterns: tools/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a
+	$(CC) -std=gnu11 -O2 -w -I$(POCKET)/engine -I$(POCKET)/seq tools/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a -lm -o $@
+$(BUILD)/render_clips: tools/render_clips.c $(BUILD)/c12_unity.o
+	$(CC) -std=gnu11 -O2 -w -Icore -I$(POCKET)/engine -I$(POCKET)/seq tools/render_clips.c $(BUILD)/c12_unity.o -lm -o $@
+site-data: $(BUILD)/export_patterns $(BUILD)/render_clips
+	@mkdir -p $(BUILD)/clips
+	$(BUILD)/export_patterns $(BUILD)/patterns.bin > $(BUILD)/patterns_meta.json
+	$(BUILD)/render_clips $(BUILD)/clips > $(BUILD)/clips_meta.json
+	$(PY) tools/make_site_data.py
+site-serve:
+	$(PY) -m http.server 8000 --directory docs
 
 bench: $(BUILD)/bench
 	$(BUILD)/bench

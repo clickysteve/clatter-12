@@ -31,6 +31,10 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 | On a Plinky 12 | **never run.** CPU load on core 1 is the open question; the panel measures it on its DSP page |
 | Saving, MIDI, CV | not yet (roadmap) |
 
+**Project page:** `docs/index.html` is a self-contained page in CLATTER Pocket's style with a working model
+of the grid and four audio clips rendered by this engine. Open it locally with `make site-serve`, or from
+GitHub Pages (Settings, Pages, deploy from `main`, folder `/docs`).
+
 ## Playing it (as designed; simulated)
 
 | Grid | |
