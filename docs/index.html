@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CLATTER 12</title>
-<meta name="description" content="CLATTER's LXR drum synthesis and generative sequencer as a native Plinky 12 custom panel. Experimental: runs in Plinky's emulator, not yet on a Plinky 12.">
+<meta name="description" content="CLATTER's LXR drum synthesis and generative sequencer as a native Plinky 12 custom panel: SEQ, SOUND, GEN, MIX and FX pages on the 16 x 16 pressure grid. Experimental: not yet run on a Plinky 12.">
 <meta property="og:title" content="CLATTER 12">
 <meta property="og:description" content="Seven voices of authentic LXR drum synthesis on the Plinky 12's 16 x 16 pressure grid. Experimental: emulator only.">
 <meta property="og:type" content="website">
@@ -29,7 +29,7 @@
 <section class="hero" aria-labelledby="h-title">
   <h1 id="h-title" class="title">CLATTER <i>12</i></h1>
   <p class="sub">The CLATTER drum machine, native to the Plinky 12.</p>
-  <p class="lede">Seven voices of authentic LXR drum synthesis, a generative sequencer, and a 16 × 16 grid of pressure-sensitive pads. One custom panel, built into Plinky's own firmware. Play it below: the page runs the real engine.</p>
+  <p class="lede">Seven voices of authentic LXR drum synthesis, a generative sequencer and procedural kits on a 16 × 16 grid of pressure-sensitive pads. Five pages: SEQ, SOUND, GEN, MIX, FX. One custom panel, built into Plinky's own firmware. Play it below: the page runs the panel's own code.</p>
   <div class="cta">
     <a class="button primary" href="#grid">PLAY IT NOW</a>
     <a class="button" href="#what">WHAT IS IT</a>
@@ -39,33 +39,40 @@
 
 <section id="grid" aria-labelledby="h-grid">
   <h2 id="h-grid" class="section"><span>01</span> Play it</h2>
-  <p class="intro">This is the instrument's whole interface, drawn as the Plinky's pads look when lit, and it runs the real thing: the same LXR engine, sequencer and CLATTER generator as the panel, built for WebAssembly. <b>Tap any pad to switch the sound on</b>, build a beat, press <b>PLY</b>. Hover or tap anything to read what it does.</p>
+  <p class="intro">This grid is <b>the panel's own interface</b>: CLATTER 12's firmware source, engine and all, compiled to WebAssembly with a stand-in for the Plinky's API, so every pad does here exactly what it does in the firmware. <b>Tap a pad to put a step in</b>, press <b>PLY</b> (bottom right), and use row 15's first six pads to change page. Hover or tap anything to read what it does.</p>
+  <p class="fine" style="margin:-10px 0 18px">It is an interface demonstration, not a Plinky: no pressure sensor, no Plinky delay or reverb (the sends are silent here), no CPU limit, and it says nothing about how the hardware will perform.</p>
   <div class="guide">
     <div class="stage">
+      <div class="pagebar" id="pagebar" role="group" aria-label="Pages (the same as row 15's first six pads)">
+        <button type="button" data-page="0">SEQ</button><button type="button" data-page="1">SOUND</button><button type="button" data-page="2">GEN</button><button type="button" data-page="3">MIX</button><button type="button" data-page="4">FX</button><button type="button" data-page="5">SAVE</button>
+      </div>
       <div class="board faceplate" id="board">
         <div class="plinky" id="plinky">
           <div class="rows" id="rows" aria-hidden="true"></div>
-          <div class="panel-face"><div id="pads" role="group" aria-label="The 16 by 16 pad grid"></div></div>
+          <div class="panel-face"><div id="pads" role="group" aria-label="The 16 by 16 pad grid"></div>
+            <div class="savepage" id="savepage" hidden><p><b>SAVE PAGE</b>On a Plinky this is Plinky's own save and load page: CLATTER 12 writes the whole project to a song slot. Here, use SAVE PROJECT and LOAD PROJECT below (the same file).</p></div>
+          </div>
           <button class="side l a" id="tempo-up" type="button" aria-label="Tempo up (left side button, top)"></button>
           <button class="side l b" id="tempo-down" type="button" aria-label="Tempo down (left side button, bottom)"></button>
-          <button class="side r a" id="page-up" type="button" aria-label="Page up (right side button, top)"></button>
-          <button class="side r b" id="page-down" type="button" aria-label="Page down (right side button, bottom)"></button>
+          <button class="side r a" id="page-up" type="button" aria-label="Previous page (right side button, top)"></button>
+          <button class="side r b" id="page-down" type="button" aria-label="Next page (right side button, bottom)"></button>
         </div>
       </div>
       <p class="lcd" id="lcd" role="status" aria-live="polite"></p>
       <div class="tools">
-        <label>PRESSURE <input id="pressure" type="range" min="0" max="100" value="85" aria-label="Pressure used when a step is entered or re-taken"><output id="pressure-out">VEL 113</output></label>
-        <button class="chip" id="sound" type="button" aria-pressed="false">START SOUND</button><span class="meter" aria-hidden="true"><i id="meter"></i></span>
+        <label>PRESSURE <input id="pressure" type="range" min="10" max="100" value="60" aria-label="Pressure of a click (0-255)"><output id="pressure-out">153</output></label>
+        <button class="chip" id="sound" type="button" aria-pressed="false">LOADING...</button><span class="meter" aria-hidden="true"><i id="meter"></i></span>
+        <button class="chip" id="release" type="button">RELEASE HELD</button>
+        <button class="chip" id="save" type="button">SAVE PROJECT</button>
+        <label class="chip filechip">LOAD PROJECT<input id="load" type="file" accept=".json,application/json"></label>
         <button class="chip" id="face" type="button" aria-pressed="true">FACEPLATE</button>
-        <button class="chip" id="reset" type="button">RESET BEAT</button>
       </div>
-      <p class="fine">A mouse has one pressure, so the slider stands in for how hard you press (a pen uses its real pressure). Holding a page pad and tapping another copies the page: on a touch screen use two fingers; with a mouse, <kbd>Shift</kbd>-click the first page pad to hold it. The sound is the panel's engine at the Plinky's 32 kHz, but this is not a Plinky: there is no Plinky output stage, real pressure or CPU limit here, so it says nothing about how the hardware will perform. Drawn from the Plinky 12's published layout (16 × 16 pads, four side buttons), not from a photograph.</p>
+      <p class="fine">A mouse has one pressure, so the slider stands in for how hard you press (a pen uses its real pressure). Two-handed gestures (hold a step and tap the editor rows below it; hold a page pad and tap another to copy) work with two fingers on a touch screen; with a mouse, <kbd>Shift</kbd>-click a pad to keep it held, and RELEASE HELD lets go. SAVE PROJECT downloads the very JSON the panel gives Plinky's save page.</p>
     </div>
     <aside class="readout" id="readout" aria-live="polite" aria-label="What the selected pad does">
       <p class="readout-name" id="ro-name">READOUT</p>
       <p class="readout-kind" id="ro-kind"></p>
       <p class="readout-does" id="ro-does">Hover or tap a pad.</p>
-      <p class="readout-try" id="ro-try"></p>
     </aside>
   </div>
 </section>
@@ -79,19 +86,24 @@
       <p class="tags">6 VOICES · 7 TRIGGERS · VARIATIONS</p>
     </article>
     <article class="window">
-      <h3 class="tab">A Plinky custom panel</h3>
-      <p>One C++ file written for Plinky's public panel API. Plinky's IDE builds it into the firmware; nothing is replaced and the stock panels stay.</p>
-      <p class="tags">NATIVE · RP2350 · NO FIRMWARE SWAP</p>
+      <h3 class="tab">SEQ: rhythm first</h3>
+      <p>Seven LXR triggers by 16 steps. Tap a pad on, tap it off; hold it to edit it: variation, condition (1:2 to 4:4, chance), ratchet up to 8×, roll spacing and velocity run. No variation lanes: the freed rows are the step editor, mute, solo, lock, length and swing.</p>
+      <p class="tags">PRESSURE · CONDITIONS · RATCHETS</p>
     </article>
     <article class="window">
-      <h3 class="tab">Generative sequencing</h3>
-      <p>Eleven rhythm styles, mutation, and sixteen designed kits, all from CLATTER. Up to 64 steps on four pages.</p>
-      <p class="tags">GEN · MUT · KIT · UNDO</p>
+      <h3 class="tab">SOUND: the LXR, a row each</h3>
+      <p>Every LXR parameter of the chosen voice, one row each, its value across the columns, in three banks: SOURCE, SHAPE, MOD. Menus show their options. Heard at once; audition without leaving.</p>
+      <p class="tags">33 PARAMETERS A VOICE · FINE ± · AUDITION</p>
     </article>
     <article class="window">
-      <h3 class="tab">Built for the pads</h3>
-      <p>Seven drum rows with a variation lane under each. How hard you press a step sets its velocity, and brightness shows it.</p>
-      <p class="tags">PRESSURE · RGB · 16 × 16</p>
+      <h3 class="tab">GEN: patterns and kits</h3>
+      <p>CLATTER's pattern generator (eleven styles, density, complexity, mutation, one track at a time) and its kit designer: a new kit, a new sound, mutate a kit or a sound, with wildness, amount and locks. Every result is a new design, not a preset. Undo and redo.</p>
+      <p class="tags">PROCEDURAL · LOCKS · UNDO</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">MIX and FX</h3>
+      <p>Channel strips: level, pan, mute, solo, delay and reverb sends into Plinky's own effects, master. The LXR-02's own drive, ring modulator and compressor on the tracks you route, bit and sample-rate reduction, and a limiter.</p>
+      <p class="tags">REAL AUDIO · NOT JUST LIGHTS</p>
     </article>
   </div>
 </section>
@@ -106,12 +118,13 @@
     <table>
       <thead><tr><th>Where</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><th>Desktop tests</th><td class="ok"><b>Pass.</b> The engine matches CLATTER Pocket's reference build (spectra within 0.03 dB per band), the 32 kHz conversion is clean, and 3,200 of 3,200 generated patterns and kits are identical to Pocket's.</td></tr>
-        <tr><th>Cortex-M33 compile</th><td class="ok"><b>Compiles</b> for the RP2350's core with GCC. About 51 KB of code, 21 KB of constants, no software double-precision on the audio path.</td></tr>
-        <tr><th>This page</th><td class="ok"><b>Runs the engine in your browser</b> as WebAssembly: the generator reproduces the native one byte for byte, and the audio matches the native build to better than 60 dB.</td></tr>
-        <tr><th>Plinky's emulator</th><td class="ok"><b>Compiles, links, boots and runs</b> with no audio underruns over four minutes. The CPU readout shows 0 there, and 17 samples clipped while editing.</td></tr>
-        <tr><th>A Plinky 12</th><td class="no"><b>Never run.</b> CPU load on the audio core is the open question: it decides whether all seven voices fit.</td></tr>
-        <tr><th>Saving, MIDI, CV</th><td class="no"><b>Not built yet.</b></td></tr>
+        <tr><th>Desktop tests</th><td class="ok"><b>Pass.</b> The engine matches CLATTER Pocket's reference build (spectra within 0.03 dB per band); the panel passes 127 scripted checks in CLATTER 12's simulator of the Plinky API: steps, variations, conditions over whole passes, ratchets, kits, mixer, FX, saving and loading, undo.</td></tr>
+        <tr><th>Cortex-M33 compile</th><td class="ok"><b>Compiles</b> for the RP2350's core with GCC: about 89 KB of code and 27 KB of constants for engine and panel, no software double-precision anywhere.</td></tr>
+        <tr><th>CPU (an estimate)</th><td class="no"><b>Tight.</b> In QEMU's Cortex-M33 model the engine runs about 168,000 instructions per 2 ms audio block on average and 244,000 in the busiest (two LXR blocks). At 150 MHz that is at least 56 % and 81 % of the audio core before memory wait states. Only a Plinky can say if it fits.</td></tr>
+        <tr><th>This page</th><td class="ok"><b>Runs the panel itself</b> as WebAssembly: the firmware's interface and engine, with a simulator standing in for the Plinky.</td></tr>
+        <tr><th>Plinky's emulator</th><td class="ok"><b>Ran the first version</b> with no underruns. This version has not been tried there yet.</td></tr>
+        <tr><th>A Plinky 12</th><td class="no"><b>Never run.</b></td></tr>
+        <tr><th>MIDI, CV</th><td class="no"><b>Not built yet.</b></td></tr>
       </tbody>
     </table>
   </div>
@@ -124,7 +137,7 @@
     <li>Get the source: <code>git clone --recurse-submodules https://github.com/clickysteve/clatter-12</code></li>
     <li>Build the panel and run the tests: <code>make</code>. It writes <code>build/clatter_12.cpp</code>.</li>
     <li>Open <a href="https://plinky12.com/codeed.html">Plinky's code editor</a> (closed beta: access comes from their Discord), paste the file into a new tab, press <b>Test</b>.</li>
-    <li>Play: <b>PLY</b> starts the beat, a hard press makes a loud step, the lane under a step cycles its variation, <b>GEN</b> and <b>KIT</b> change the pattern and the sound.</li>
+    <li>Play: <b>PLY</b> starts the beat, a hard press makes a loud step, holding a step lets the rows under it change it, and row 15 moves between SEQ, SOUND, GEN, MIX, FX and SAVE.</li>
   </ol>
   <pre>git clone --recurse-submodules https://github.com/clickysteve/clatter-12
 cd clatter-12

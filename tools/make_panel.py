@@ -24,8 +24,10 @@ METADATA = """/*
 @Preferred Panels: blocks
 @Documentation: https://github.com/clickysteve/clatter-12
 @Description: EXPERIMENTAL. CLATTER's LXR-02 drum synthesis and generative sequencer as a
-  native Plinky 12 instrument: seven LXR triggers on a 16-step pressure grid, variations, four
-  pages, pattern generation and mutation. Not verified on hardware.
+  native Plinky 12 instrument. SEQ: seven LXR triggers on a 16-step pressure grid, variations,
+  conditions and ratchets on held steps. SOUND: every LXR parameter of a voice, a row each. GEN:
+  pattern generator and procedural kits with locks. MIX: levels, pans, sends. FX: the LXR's drive,
+  ring modulator and compressor. Saves to Plinky's song slots. Not verified on hardware.
 
 CLATTER 12 %(version)s (%(commit)s). Build: %(config)s.
 */
@@ -47,8 +49,11 @@ PRELUDE = """
 #endif
 #if C12_LXR_IN_RAM && !defined(WASM) && !defined(EMU)
 // The LXR's per-sample code (the firmware's IN_ITCM_RAM functions) in SRAM, through the same
-// section family PLINKY_DSP_RAM_FUNC uses. Off by default: the RAM code region is small.
-#define C12_LXR_CODE __attribute__((noinline, section(".time_critical.c12lxr")))
+// section family PLINKY_DSP_RAM_FUNC uses. Off by default: the RAM code region is small. Each
+// function gets a section of its own (GCC 13 refuses inline and out-of-line functions in one).
+#define C12_STR2_(x) #x
+#define C12_STR_(x) C12_STR2_(x)
+#define C12_LXR_CODE __attribute__((noinline, section(".time_critical.c12lxr." C12_STR_(__COUNTER__))))
 #else
 #define C12_LXR_CODE
 #endif

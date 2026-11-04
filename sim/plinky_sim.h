@@ -68,10 +68,13 @@ extern uint32_t palette[16][16]; // sim: an approximation, not Plinky's palette.
 static inline uint32_t palette_hue_to_col(uint8_t hue_q4, int brightness_q3 = 8) {
   return palette[brightness_q3 & 15][hue_q4 & 15];
 }
+// Pages stack vertically: page p is rows p*16 .. p*16+15 of one canvas (the settings page, above
+// page 0, is drawn by the system). The sim keeps SIM_PAGES pages.
+#define SIM_PAGES 8
 extern uint32_t *rgbs;
 void set_led(int x, int y, uint32_t rgb15);
 uint32_t get_led(int x, int y);
-static inline void leds_clear() { memset(rgbs, 0, 256 * sizeof(uint32_t)); }
+void leds_clear();
 
 // ---- touch (blocks_ll.h) ----
 static inline int touch_pressure_curve_q7(int pressure) {
@@ -105,6 +108,8 @@ uint32_t time_us();
 
 // ---- paging, system UI (blocks_ll.h) ----
 int get_scroll_target_page(void);
+int get_scroll_page(void);
+void scroll_to_page(int page);
 void show_ripple(int16_t x, int16_t y, uint32_t color);
 int draw_system_style_settings_page(const char *name4, const char *value4 = NULL, int bar_percent = -1,
                                     int highlight_x1 = 0, int highlight_x2 = 0, uint32_t value_color = 0);
@@ -123,8 +128,37 @@ typedef struct mix_buffers_t {
   int reverbsend[BLOCK_SIZE];
 } mix_buffers_t;
 
+// ---- saving (save_and_load.h), as the published panels use it: OBJECT_BEGIN, FIELD,
+// FIELD_BASE64, OBJECT_END, s.reading. The sim's serialiser writes and reads a flat JSON object of
+// numbers and base64 strings in a caller's buffer; Plinky's writes JSON to the SD card. ----
+struct serialiser_t {
+  bool reading;
+  char *buf;
+  int cap, len;
+  bool first;
+  serialiser_t(bool reading_, char *buf_, int cap_, int len_ = 0) : reading(reading_), buf(buf_), cap(cap_), len(len_), first(true) {}
+  void begin();
+  void end();
+  void field_int(const char *name, long *v, long lo, long hi);
+  void field_base64(const char *name, void *data, int &bytes, int max_bytes);
+  template <typename T> void field(const char *name, T &v, long lo, long hi) {
+    long x = (long)v;
+    field_int(name, &x, lo, hi);
+    if (reading) v = (T)x;
+  }
+};
+#define OBJECT_BEGIN(s) { serialiser_t &sim_ser_ = (s); sim_ser_.begin();
+#define FIELD(name, var, lo, hi) sim_ser_.field(name, var, (long)(lo), (long)(hi))
+#define FIELD_BASE64(name, data, bytes, max_bytes) sim_ser_.field_base64(name, data, bytes, max_bytes)
+#define OBJECT_END(s) sim_ser_.end(); }
+#define FLAG_PICKER_ENABLE_DELETE 1
+// The stock save/load page (blocks.h panel_page_t::saveload): the sim draws a placeholder and
+// counts the calls; saving and loading are driven by the test (sim::save, sim::load_into).
+struct panel_page_t {
+  void saveload(int slots, bool show_name = true, int flags = 0);
+};
+
 // ---- the panel base (blocks.h), the hooks CLATTER 12 overrides ----
-struct serialiser_t;
 struct panel_t {
   virtual int get_num_pages(void) { return 1; }
   virtual int get_num_panel_settings_pages(void) { return 0; }
@@ -138,6 +172,12 @@ struct panel_t {
     return false;
   }
   virtual int get_num_tracks(void) { return 8; }
+  virtual int get_version(void) { return 0; }
+  virtual bool on_serialise(serialiser_t &s, int version) { (void)s; (void)version; return true; }
+  virtual bool on_serialise_settings(serialiser_t &s, int version) { (void)s; (void)version; return true; }
+  virtual void on_load_finished(void) {}
+  // runs on the live panel before a staged load is read into `staged` (blocks.h)
+  virtual bool on_prepare_staged_load(panel_t *staged, size_t panel_memory_size) { (void)staged; (void)panel_memory_size; return true; }
   virtual const char *get_track_name(int i, char buf[16]) { (void)i; return buf; }
   virtual ~panel_t(void) {}
 };
@@ -145,11 +185,14 @@ struct panel_t {
 // ---- simulator control (not Plinky API) ----
 namespace sim {
 void reset();
-void touch(int x, int y, int pressure); // finger down (or pressure change) on a pad
+void touch(int x, int y, int pressure); // finger down (or pressure change) on a pad of the shown page
 void release(int x, int y);
+void release_all();
 void ui_frame_edges();                  // the driver calls this before each on_ui
 void set_scroll_page(int page);
 void advance_us(uint32_t us);           // move simulated time
-uint32_t led(int x, int y);
+uint32_t led(int x, int y);             // an LED of the page shown
+void set_num_pages(int n);              // the panel's get_num_pages (scroll_to_page clamps to it)
+int saveload_calls();
 void write_ppm(const char *path, int scale);
 } // namespace sim

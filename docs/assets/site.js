@@ -1,395 +1,292 @@
-/* CLATTER 12 project page: the panel's interface (panel/clatter12.cpp) as a working model, wired to
-   the real engine. The sound, the sequencer and CLATTER's generator are the panel's own code built for
-   WebAssembly (assets/c12.wasm, core/c12_wasm.c). The audio runs in an AudioWorklet
-   (assets/c12-worklet.js); a second instance on this thread only runs the generator for GEN and MUT.
-   Pad behaviour mirrors the panel; where it cannot (a mouse has no pressure) the page says so.
+/* CLATTER 12 project page: the panel itself, running in the browser.
+   The grid is drawn from the LEDs of CLATTER 12's own panel source (panel/clatter12.cpp), engine
+   included, built for WebAssembly with CLATTER 12's simulator of the Plinky API (assets/c12panel.wasm,
+   sim/wasm_panel.cpp). So what a pad does here is what the firmware does: nothing about the controls
+   is re-implemented in this file. Until sound is started the panel runs on this thread, silent; then
+   it moves, with its project, into an AudioWorklet (assets/c12-worklet.js). It is a demonstration of
+   the interface, not a Plinky: no pressure sensor, no Plinky delay or reverb, no CPU limit.
    Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only */
 (() => {
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
-const NT = 7, NS = 64;
-
-/* names as the engine reports them (tests/test_wasm.mjs checks these against the module) */
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const PAGES = ['SEQ', 'SOUND', 'GEN', 'MIX', 'FX', 'SAVE'];
 const STYLES = ['MACHINE', 'ELECTRO', 'BREAKS', 'JUNGLE', 'HALFTIME', 'BROKEN', 'GARAGE', 'INDUSTRIAL', 'GLITCH', 'POLYMETER', 'DUB'];
 const KITS = ['CLASSIC', 'ANALOG', 'DIGITAL', 'INDUSTRIAL', 'MINIMAL', 'GLITCH', 'TECHNO', 'ELECTRO', 'DUB', 'NOISE', 'METALLIC', 'SOFT', 'BROKEN', 'ACID', 'LO-FI', 'CHAOS'];
+/* row 15 is the same on every page: its labels */
+const ROW15 = { 0: 'SEQ', 1: 'SND', 2: 'GEN', 3: 'MIX', 4: 'FX', 5: 'SAV', 12: 'UND', 13: 'RED', 14: 'STP', 15: 'PLY' };
+const ROW15_SEQ = { 6: 'GEN', 7: 'MUT', 8: 'STY', 9: 'CLR' };
 
-/* LED colours of the panel (panel/clatter12.cpp track_col), 5-bit values scaled to 8-bit */
-const TRACKS = [
-  ['DRUM 1', [255, 16, 0]], ['DRUM 2', [255, 98, 0]], ['DRUM 3', [230, 213, 0]], ['SNARE', [33, 255, 16]],
-  ['CYMBAL', [0, 213, 197]], ['CL HAT', [16, 66, 255]], ['OP HAT', [180, 16, 255]],
-];
-const VARS = ['none', 'A', 'B', 'second sound', 'second sound A', 'second sound B'];
-const lerp = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
-const scale = (c, f) => c.map(v => Math.min(255, Math.round(v * f)));
-const add = (a, b) => a.map((v, i) => Math.min(255, v + b[i]));
-const hue = (h, l) => { const a = (h % 16) / 16, k = n => (n + a * 12) % 12, m = Math.min(l, 1 - l); const f = n => l - m * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1)); return [f(0), f(8), f(4)].map(v => Math.round(v * 255)); };
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const velOf = pct => Math.round(32 + pct * 0.95);
+/* ---- the panel: here (silent) or in the audio worklet ---- */
+const P = { mod: null, x: null, node: null, ctx: null, gain: null, state: 'loading', why: '', remote: false,
+  leds: new Uint32Array(256), page: 0, playing: 0, tempo: 120, status: [0, 0, 1, 0, 50, 0, 0, 0, 0], peak: 0, muted: false,
+  waits: new Map(), id: 0, last: 0, timer: 0 };
 
-/* ---- state: the pattern is the sequencer's own 32-bit cells (velocity, tone, condition) ---- */
-const S = {
-  cell: new Uint32Array(NT * NS), pages: 1, view: 0, playing: false, pos: -1, bpm: 120,
-  style: 0, kit: 0, kitSet: false, genSeed: 1, mutN: 0, undo: null, sticky: -1,
-  pressure: 85, face: true, clrT0: 0, bpmUntil: 0, say: '', sayUntil: 0, sel: -1,
+function str(p) { const m = new Uint8Array(P.x.memory.buffer, p); let n = 0; while (m[n]) n++; return new TextDecoder().decode(m.subarray(0, n)); }
+function putText(s) { const b = new TextEncoder().encode(s); new Uint8Array(P.x.memory.buffer, P.x.c12p_text(), b.length + 1).set([...b, 0]); return b.length; }
+function ask(m) { return new Promise((res) => { const id = ++P.id; P.waits.set(id, res); P.node.port.postMessage({ ...m, id }); }); }
+
+const panel = {
+  touch(x, y, p) { if (P.remote) P.node.port.postMessage({ t: 'touch', x, y, p }); else if (P.x) P.x.c12p_touch(x, y, p); },
+  releaseAll() { if (P.remote) P.node.port.postMessage({ t: 'release_all' }); else if (P.x) P.x.c12p_release_all(); },
+  setPage(page) { if (P.remote) P.node.port.postMessage({ t: 'page', page }); else if (P.x) P.x.c12p_set_page(page); },
+  setTempo(bpm) { if (P.remote) P.node.port.postMessage({ t: 'tempo', bpm }); else if (P.x) P.x.c12p_set_tempo(bpm); },
+  async help(x, y) { if (P.remote) return (await ask({ t: 'help', x, y })).text; return P.x ? str(P.x.c12p_help(x, y)) : ''; },
+  async save() { if (P.remote) return (await ask({ t: 'save' })).text; const n = P.x.c12p_save(); return str(P.x.c12p_text()).slice(0, n); },
+  async load(text) { if (P.remote) return (await ask({ t: 'load', text })).ok; return P.x.c12p_load(putText(text)) === 0; },
 };
-const V = i => S.cell[i] & 0xff;
-const TONE = i => (S.cell[i] >>> 8) & 0xff;
-const VR = i => { const t = TONE(i); return t >= 128 ? t - 128 : 0; };
-const mk = (v, variation) => (v | ((variation ? 128 + variation : 0) << 8)) >>> 0;
 
-/* ---- the engine ---- */
-const E = { mod: null, bytes: null, gen: null, loading: null, ctx: null, node: null, gain: null, state: 'off', why: '', rate: 0, peak: 0, muted: false, queue: [], timer: 0 };
-function loadEngine() {
-  E.loading = (async () => {
-    const r = await fetch('assets/c12.wasm');
-    if (!r.ok) throw new Error('c12.wasm: HTTP ' + r.status);
-    E.bytes = await r.arrayBuffer();
-    E.mod = await WebAssembly.compile(E.bytes);
-    E.gen = (await WebAssembly.instantiate(E.mod, {})).exports;
-  })().catch(err => { E.why = 'the engine did not load (' + (err.message || err) + ')'; sound(); });
+/* here, silent: one panel frame per 4 ms of real time */
+function localTick(now) {
+  P.timer = 0;
+  if (P.remote || !P.x) return;
+  let n = Math.floor((now - P.last) / 4);
+  if (n > 0) {
+    P.last += n * 4;
+    if (n > 30) { n = 30; P.last = now; }
+    for (let i = 0; i < n; i++) P.x.c12p_frame();
+    P.leds.set(new Uint32Array(P.x.memory.buffer, P.x.c12p_leds(), 256));
+    P.page = P.x.c12p_page(); P.playing = P.x.c12p_playing(); P.tempo = P.x.c12p_tempo();
+    for (let i = 0; i < 9; i++) P.status[i] = P.x.c12p_status(i);
+    render();
+  }
+  P.timer = requestAnimationFrame(localTick);
 }
-function post(m, transfer) {
-  if (E.state === 'on') E.node.port.postMessage(m, transfer || []);
-  else if (E.state === 'starting' && m.t === 'trigger') E.queue.push(m);
+
+async function loadPanel() {
+  try {
+    const r = await fetch('assets/c12panel.wasm');
+    if (!r.ok) throw new Error('c12panel.wasm: HTTP ' + r.status);
+    P.bytes = await r.arrayBuffer();
+    P.mod = await WebAssembly.compile(P.bytes);
+    P.x = (await WebAssembly.instantiate(P.mod, {})).exports;
+    P.x.__wasm_call_ctors();
+    if (P.x.c12p_init() !== 0) throw new Error('the engine did not start');
+    P.state = 'off';
+    P.last = performance.now();
+    P.timer = requestAnimationFrame(localTick);
+    hint();
+  } catch (err) { P.state = 'failed'; P.why = String(err.message || err); }
+  sound();
 }
-function syncPattern() { const b = S.cell.slice().buffer; post({ t: 'pattern', cells: b, pages: S.pages }, [b]); }
-function pushAll() {
-  syncPattern();
-  post({ t: 'tempo', bpm: S.bpm });
-  if (S.kitSet) post({ t: 'kit', character: S.kit, seed: S.kit * 37, wild: 50 });
-  if (S.playing) post({ t: 'play', on: 1 });
-}
+
 function startAudio() {
-  if (E.state !== 'off') return;
+  if (P.state !== 'off') return;
   const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC || !window.WebAssembly) { E.state = 'failed'; E.why = 'this browser has no Web Audio or WebAssembly'; sound(); return; }
-  E.state = 'starting'; sound();
+  if (!AC) { P.state = 'failed'; P.why = 'this browser has no Web Audio'; sound(); return; }
+  P.state = 'starting'; sound();
   let ctx; /* created inside the user's tap: browsers refuse to start audio otherwise */
   try { ctx = new AC({ sampleRate: 32000, latencyHint: 'interactive' }); } catch (_) { ctx = new AC({ latencyHint: 'interactive' }); }
-  E.ctx = ctx; ctx.resume();
+  P.ctx = ctx; ctx.resume();
   (async () => {
-    await E.loading;
-    if (!E.mod) throw new Error(E.why || 'no engine');
     if (!ctx.audioWorklet) throw new Error('AudioWorklet needs https or localhost');
     await ctx.audioWorklet.addModule('assets/c12-worklet.js');
-    const opts = { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] };
-    let node;
-    try { node = new AudioWorkletNode(ctx, 'c12', { ...opts, processorOptions: { module: E.mod } }); }
-    catch (_) { node = new AudioWorkletNode(ctx, 'c12', { ...opts, processorOptions: { bytes: E.bytes } }); }
-    node.port.onmessage = onEngine;
-    node.onprocessorerror = () => { E.state = 'failed'; E.why = 'the audio worklet stopped'; sound(); };
-    E.gain = ctx.createGain(); node.connect(E.gain); E.gain.connect(ctx.destination); E.node = node;
-  })().catch(err => { E.state = 'failed'; E.why = String(err.message || err); sound(); });
+    const node = new AudioWorkletNode(ctx, 'c12panel', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2], processorOptions: { module: P.mod } });
+    const gain = ctx.createGain();
+    node.connect(gain).connect(ctx.destination);
+    P.node = node; P.gain = gain;
+    node.port.onmessage = onWorklet;
+    node.onprocessorerror = () => { P.state = 'failed'; P.why = 'the audio worklet stopped'; sound(); };
+  })().catch((err) => { P.state = 'failed'; P.why = String(err.message || err); P.ctx = null; sound(); });
 }
-function onEngine(e) {
+async function onWorklet(e) {
   const m = e.data;
   if (m.t === 'ready') {
-    if (!m.ok) { E.state = 'failed'; E.why = 'the engine would not start at ' + m.rate + ' Hz'; sound(); return; }
-    E.state = 'on'; E.rate = m.rate; clearInterval(E.timer); E.timer = 0; if (raf) { cancelAnimationFrame(raf); raf = 0; }
-    pushAll(); for (const q of E.queue) post(q); E.queue = []; S.pos = -1; sound(); render();
-  } else if (m.t === 'pos') { S.pos = m.pos === 255 ? -1 : m.pos; render(); }
-  else if (m.t === 'level') { E.peak = m.peak; meter(); }
+    if (!m.ok) { P.state = 'failed'; P.why = 'the engine did not start in the worklet'; sound(); return; }
+    /* the project moves across: what was built here keeps playing there */
+    const text = await panel.save(), page = P.page, tempo = P.tempo, playing = P.playing;
+    if (P.timer) cancelAnimationFrame(P.timer);
+    P.timer = 0;
+    P.x.c12p_release_all();
+    const node = P.node;
+    const loaded = await new Promise((res) => { const id = ++P.id; P.waits.set(id, res); node.port.postMessage({ t: 'load', text, id }); });
+    if (!loaded.ok) console.warn('CLATTER 12: the project did not move to the audio worklet');
+    P.remote = true;
+    fingers.clear(); /* a touch that began before the move has been played here: it ends with it */
+    panel.setPage(page);
+    panel.setTempo(tempo);
+    if (playing) { panel.touch(15, 15, 150); setTimeout(() => panel.touch(15, 15, 0), 60); }
+    P.state = 'on'; P.rate = m.rate; sound();
+  } else if (m.t === 'state') {
+    P.leds = m.leds; P.page = m.page; P.playing = m.playing; P.tempo = m.tempo; P.status = m.status; P.peak = Math.max(P.peak * .8, m.peak);
+    render(); meter();
+  } else if (m.id && P.waits.has(m.id)) {
+    P.waits.get(m.id)(m); P.waits.delete(m.id);
+  }
 }
 function sound() {
-  const el = $('#snd'), chip = $('#sound');
-  const txt = { off: 'SOUND OFF', starting: 'STARTING...', on: E.muted ? 'MUTED' : 'SOUND ON', failed: 'NO SOUND' }[E.state];
-  if (el) el.textContent = txt;
-  if (chip) { chip.setAttribute('aria-pressed', E.state === 'on' && !E.muted); chip.textContent = E.state === 'failed' ? 'NO SOUND' : (E.state === 'on' && !E.muted ? 'SOUND ON' : (E.state === 'on' ? 'SOUND OFF' : 'START SOUND')); }
-  if (E.state === 'failed') say('NO SOUND: ' + E.why.toUpperCase().slice(0, 60));
+  const b = $('#sound');
+  b.textContent = { loading: 'LOADING...', off: 'START SOUND', starting: 'STARTING...', on: P.muted ? 'UNMUTE' : 'MUTE', failed: 'NO SOUND' }[P.state];
+  b.setAttribute('aria-pressed', P.state === 'on' && !P.muted ? 'true' : 'false');
+  b.disabled = P.state === 'loading' || P.state === 'starting' || P.state === 'failed';
+  if (P.state === 'failed') say('NO SOUND: ' + P.why.toUpperCase());
   render();
 }
 let lastMeter = -1;
-function meter() { const w = Math.round(clamp(Math.pow(E.peak, .5), 0, 1) * 20) * 5; if (w !== lastMeter) { lastMeter = w; $('#meter').style.width = w + '%'; } }
-function audition(track, vel, variation) { post({ t: 'trigger', track, velocity: vel, variation }); }
+function meter() { const w = Math.round(clamp(Math.pow(P.peak, .5), 0, 1) * 20) * 5; if (w !== lastMeter) { lastMeter = w; $('#meter').style.width = w + '%'; } }
 
-/* ---- the pads ---- */
+/* ---- the pads: the panel's LEDs ---- */
 const pads = $('#pads'), els = [];
-const CTRL = [['P1', 'PAGE 1'], ['P2', 'PAGE 2'], ['P3', 'PAGE 3'], ['P4', 'PAGE 4'], ['16', 'LENGTH 16'], ['32', 'LENGTH 32'], ['48', 'LENGTH 48'], ['64', 'LENGTH 64'],
-  ['GEN', 'GENERATE'], ['MUT', 'MUTATE'], ['KIT', 'NEXT KIT'], ['STY', 'STYLE'], ['UND', 'UNDO'], ['CLR', 'CLEAR'], ['STP', 'STOP'], ['PLY', 'PLAY']];
 for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'pad'; b.dataset.x = x; b.dataset.y = y; b.tabIndex = (x === 0 && y === 0) ? 0 : -1;
-  const t = document.createElement('span'); t.className = 't';
-  if (y === 15) t.textContent = CTRL[x][0];
-  b.appendChild(t);
-  b.setAttribute('aria-label', describe(x, y).name);
+  const t = document.createElement('span'); t.className = 't'; b.appendChild(t);
   pads.appendChild(b); els.push(b);
 }
-const rowsEl = $('#rows');
-for (let y = 0; y < 16; y++) {
-  const s = document.createElement('span');
-  if (y < 7) { s.textContent = TRACKS[y][0]; s.style.setProperty('--k', `rgb(${TRACKS[y][1]})`); }
-  else if (y === 7) { s.textContent = 'PLAYHEAD'; s.style.setProperty('--k', '#e8e8e8'); }
-  else if (y < 15) { s.textContent = TRACKS[y - 8][0] + ' VAR'; s.style.setProperty('--k', `rgb(${scale(TRACKS[y - 8][1], .35)})`); }
-  else { s.textContent = 'CONTROLS'; s.style.setProperty('--k', '#ff9a1f'); }
-  rowsEl.appendChild(s);
-}
+const rowsEl = $('#rows'), rowEls = [];
+for (let y = 0; y < 16; y++) { const s = document.createElement('span'); rowsEl.appendChild(s); rowEls.push(s); }
 
-/* ---- the bpm number, drawn on the grid as the Plinky does for a moment ---- */
-const GLYPH = ['111101101101111', '010110010010111', '111001111100111', '111001111001111', '101101111001001',
-  '111100111001111', '111100111101111', '111001001010010', '111101111101111', '111101111001111'];
-function bpmPixel(x, y) {
-  const s = String(S.bpm), w = s.length * 4 - 1, x0 = Math.floor((16 - w) / 2), y0 = 5;
-  const gx = x - x0, gy = y - y0;
-  if (gy < 0 || gy > 4 || gx < 0 || gx >= w || gx % 4 === 3) return null;
-  return GLYPH[+s[Math.floor(gx / 4)]][gy * 3 + (gx % 4)] === '1' ? [230, 230, 230] : null;
-}
-
-/* ---- what a pad shows (the panel's draw()) ---- */
-function led(x, y, now) {
-  if (S.bpmUntil > now) return { c: bpmPixel(x, y) };
-  const head = S.playing && S.pos >= 0 ? S.pos : -1;
-  const inLen = S.view < S.pages;
-  if (y < 7 || (y > 7 && y < 15)) {
-    const t = y < 7 ? y : y - 8, s = S.view * 16 + x, i = t * NS + s, v = V(i), at = head === s;
-    const tint = S.face ? scale(TRACKS[t][1], .065) : null;
-    if (y < 7) {
-      if (v) { let c = scale(TRACKS[t][1], (64 + Math.min(v, 127) * 192 / 127) / 256); if (!inLen) c = scale(c, .25); if (at) c = add(c, [115, 115, 115]); return { c }; }
-      if (at) return { c: [33, 33, 33] };
-      return { c: x % 4 === 0 ? [10, 10, 10] : null, tint };
-    }
-    let c = null;
-    if (v) {
-      const k = VR(i), base = k >= 3 ? [255, 16, 164] : TRACKS[t][1];
-      c = k ? lerp(base, [165, 165, 165], [0, 90, 180, 0, 90, 180][k] / 256) : scale(TRACKS[t][1], .25);
-      if (at) c = add(c, [33, 33, 33]);
-    }
-    return { c, tint };
-  }
-  if (y === 7) {
-    const at = head >= 0 && Math.floor(head / 16) === S.view && head % 16 === x;
-    return { c: at ? [225, 225, 225] : (x % 4 === 0 ? [10, 10, 10] : null) };
-  }
-  const playPage = head >= 0 ? Math.floor(head / 16) : -1;
-  if (x < 4) {
-    let c = x === S.view ? [225, 225, 225] : (x < S.pages ? [33, 33, 33] : [8, 8, 8]);
-    if (x === playPage && x !== S.view) c = [0, 147, 33];
-    if (x === S.sticky || heldPages().some(p => p !== x)) c = add(c, [82, 41, 0]);
-    return { c };
-  }
-  if (x < 8) return { c: (x - 4) < S.pages ? [197, 98, 0] : [25, 8, 0] };
-  if (x === 8) return { c: [115, 255, 0] };
-  if (x === 9) return { c: [0, 197, 148] };
-  if (x === 10) return { c: hue(S.kit, .5) };
-  if (x === 11) return { c: hue(S.style * 3, .42) };
-  if (x === 12) return { c: S.undo ? [82, 82, 82] : [8, 8, 8] };
-  if (x === 13) { let c = [66, 0, 0]; if (S.clrT0) c = lerp(c, [255, 0, 0], clamp((now - S.clrT0) / 500, 0, 1)); return { c }; }
-  if (x === 14) return { c: S.playing ? [82, 0, 0] : [25, 0, 0] };
-  return { c: S.playing ? [0, 255, 0] : [0, 49, 0] };
-}
-function paint(b, o) {
-  const c = o.c, key = c ? c.join() : (o.tint ? 't' + o.tint.join() : '');
-  if (b._k === key) return; b._k = key;
-  if (!c) { b.style.background = o.tint ? `rgb(${o.tint})` : ''; b.style.boxShadow = ''; b.style.setProperty('--lab', 'rgba(255,255,255,.5)'); return; }
-  const m = Math.max(...c) / 255;
+/* LED_RGB words: g << 24 | r << 16 | b << 8, 5 bits nominal (brighter saturates). A display gamma
+   (0.6), because a lit LED looks brighter to the eye than its share of full scale on a screen. */
+function rgb(c) { return [(c >>> 16) & 255, (c >>> 24) & 255, (c >>> 8) & 255].map((v) => Math.min(255, Math.round(255 * Math.pow(Math.min(v, 31) / 31, 0.6)))); }
+function paint(b, c) {
+  const k = c >>> 0;
+  if (b._k === k) return; b._k = k;
+  if (!k) { b.style.background = ''; b.style.boxShadow = ''; b.style.setProperty('--lab', 'rgba(255,255,255,.5)'); return; }
+  const v = rgb(k), key = v.join(), m = Math.max(...v) / 255;
   b.style.background = `rgb(${key})`;
   b.style.boxShadow = m > .45 ? `0 0 ${Math.round(5 + m * 12)}px rgba(${key},${(m * .5).toFixed(2)})` : '';
-  b.style.setProperty('--lab', (c[0] * .3 + c[1] * .59 + c[2] * .11) > 120 ? 'rgba(0,0,0,.78)' : 'rgba(255,255,255,.62)');
+  b.style.setProperty('--lab', (v[0] * .3 + v[1] * .59 + v[2] * .11) > 120 ? 'rgba(0,0,0,.78)' : 'rgba(255,255,255,.62)');
 }
-let lastView = -1;
+let labelsFor = -1;
+async function labels() {
+  /* row names and pad labels for the page shown, from the panel's own descriptions */
+  const page = P.page;
+  if (labelsFor === page) return;
+  labelsFor = page;
+  for (let x = 0; x < 16; x++) {
+    const t = ROW15[x] || (page === 0 ? ROW15_SEQ[x] : '') || '';
+    els[15 * 16 + x].firstChild.textContent = t;
+  }
+  for (let y = 0; y < 15; y++) {
+    let name = '';
+    if (page === 0 && y < 7) name = ['DRUM 1', 'DRUM 2', 'DRUM 3', 'SNARE', 'CYMBAL', 'CL HAT', 'OP HAT'][y];
+    else if (page !== 5) {
+      for (let x = 0; x < 16 && !name; x++) { const h = await panel.help(x, y); name = h ? h.split('\n')[0] : ''; }
+      name = name.replace(/^(DRUM \d|SNARE|CYMBAL|HI-HAT|CL HAT|OP HAT) (?=[A-Z])/, '').replace(/:.*$/, '').replace(/ \d+$/, '');
+      if (page === 0) name = { 8: 'VAR · RATCHET', 9: 'CONDITION', 10: 'ROLL · RAMP', 11: 'VELOCITY', 12: 'MUTE · SOLO', 13: 'LOCK · PLAY', 14: 'PAGE LEN SWING' }[y] || name;
+      if (page === 3) name = { 0: 'MUTE', 1: 'SOLO', 2: 'LEVEL', 10: 'FINE - +', 11: 'PAN', 12: 'DELAY SEND', 13: 'REVERB SEND', 14: 'METER' }[y] ?? '';
+      if (page === 4) name = name.replace('COMPRESSOR', 'COMP').replace(' (WET)', '').replace('RING MOD', 'RING').replace(/ RATIO.*/, ' RATIO').replace(/SHAPE.*/, 'SHAPE');
+      if (page === 2) name = name.replace('MUTATION AMOUNT', 'MUT AMOUNT');
+    }
+    if (labelsFor !== page) return;
+    rowEls[y].textContent = name.slice(0, 14);
+  }
+  rowEls[15].textContent = 'PAGES · PLAY';
+  if (P.page === 5) rowEls[7].textContent = "PLINKY'S SAVE PAGE";
+}
 function render() {
-  const now = performance.now();
-  if (lastView !== S.view) { lastView = S.view; for (let i = 0; i < 256; i++) { const y = (i / 16) | 0; if (y < 7 || (y > 7 && y < 15)) els[i].setAttribute('aria-label', describe(i % 16, y).name); } }
-  for (let i = 0; i < 256; i++) paint(els[i], led(i % 16, (i / 16) | 0, now));
-  lcd(now);
+  for (let i = 0; i < 256; i++) paint(els[i], P.leds[i]);
+  labels();
+  lcd();
+  $('#savepage').hidden = P.page !== 5;
+  for (const b of document.querySelectorAll('#pagebar button')) b.setAttribute('aria-pressed', String(+b.dataset.page === P.page));
 }
-function lcd(now) {
-  const el = $('#lcd'), snd = { off: 'SOUND OFF', starting: 'STARTING...', on: E.muted ? 'MUTED' : 'SOUND ON', failed: 'NO SOUND' }[E.state];
-  const html = S.sayUntil > now
-    ? `<b>${S.say}</b>`
-    : `<span>STYLE <b>${STYLES[S.style]}</b></span><span>KIT <b>${S.kitSet ? KITS[S.kit] : 'INIT'}</b></span><span><b>${S.bpm}</b> BPM</span><span>LENGTH <b>${S.pages * 16}</b></span><span>PAGE <b>${S.view + 1}</b>/${S.pages}</span><span id="snd">${snd}</span>`;
+function lcd() {
+  const el = $('#lcd'), s = P.status;
+  const snd = { loading: 'LOADING', off: 'SOUND OFF', starting: 'STARTING...', on: P.muted ? 'MUTED' : 'SOUND ON', failed: 'NO SOUND' }[P.state];
+  const html = P.sayUntil > performance.now() ? `<b>${P.say}</b>`
+    : `<span>PAGE <b>${PAGES[P.page] || '-'}</b></span><span><b>${P.tempo}</b> BPM</span><span>${P.playing ? '<b>PLAYING</b>' : 'STOPPED'}</span><span>LENGTH <b>${s[2] * 16}</b></span><span>SWING <b>${s[4]}</b></span><span>STYLE <b>${STYLES[s[0]] || ''}</b></span><span>KIT <b>${KITS[s[1]] || ''}</b></span><span>UNDO <b>${s[7]}</b></span><span id="snd">${snd}</span>`;
   if (el._h !== html) { el._h = html; el.innerHTML = html; }
 }
-function say(msg) { S.say = msg; S.sayUntil = performance.now() + 2600; setTimeout(render, 2650); render(); }
+function say(msg) { P.say = msg; P.sayUntil = performance.now() + 2600; setTimeout(render, 2650); render(); }
 
-/* ---- descriptions (the readout) ---- */
-function describe(x, y) {
-  if (y < 7) return { name: `${TRACKS[y][0]} · STEP ${S.view * 16 + x + 1}`, kind: `STEP PAD · ${TRACKS[y][0]}`,
-    does: 'Tap an empty pad to switch the step on, as loud as you press. Tap a lit pad to switch it off. Hold a lit pad for over 0.3 s to keep it and re-take its velocity from the pressure. Stopped, a new step plays its hit.',
-    tryit: 'Try it: tap a pad, then press PLY. Move the pressure slider and tap another.' };
-  if (y === 7) return { name: 'PLAYHEAD', kind: 'DISPLAY ROW', does: 'One white pad marks the step playing now. It follows the sequencer, so it only moves while the transport is running.', tryit: 'Try it: press PLY.' };
-  if (y < 15) return { name: `${TRACKS[y - 8][0]} VARIATION`, kind: `VARIATION PAD · ${TRACKS[y - 8][0]}`,
-    does: `Under a lit step, tap to cycle its variation: none, A, B${(y - 8 === 2 || y - 8 === 3) ? ', then its second sound (percussion on Drum 3, clap on Snare) and that sound’s A and B' : ''}. A variation is the same LXR voice with its parameters moved for that one hit. Under an empty step nothing happens.`,
-    tryit: 'Try it: tap under a lit kick, then again, with the beat playing.' };
-  const T = [
-    ['PAGE 1', 'Tap to view steps 1 to 16. Hold it and tap another page pad to copy this page onto that one.'],
-    ['PAGE 2', 'Tap to view steps 17 to 32. Hold another page pad and tap this to paste onto it.'],
-    ['PAGE 3', 'Tap to view steps 33 to 48.'], ['PAGE 4', 'Tap to view steps 49 to 64.'],
-    ['LENGTH 16', 'The pattern is 16 steps long (one page). Lit amber pads show how many pages play.'],
-    ['LENGTH 32', 'The pattern is 32 steps long (two pages).'], ['LENGTH 48', 'The pattern is 48 steps long (three pages).'], ['LENGTH 64', 'The pattern is 64 steps long (four pages).'],
-    ['GENERATE', 'Make a new pattern in the current style, with CLATTER’s generator running live on this page. It keeps your length. Undo brings the old pattern back.'],
-    ['MUTATE', 'Change the current pattern a little, with CLATTER’s mutator: it works on whatever is on the grid, your own edits included.'],
-    ['NEXT KIT', 'Step through CLATTER’s 16 designed kits. The sound changes at once. (The panel stays quiet when you do this; this page also plays a kick, hat and snare when stopped, so you can hear the kit.)'],
-    ['STYLE', 'Cycle the generator’s rhythm style (11). The next GEN uses it.'],
-    ['UNDO', 'Reverse the last generate, mutate, clear or page copy. Press again to redo.'],
-    ['CLEAR', 'Hold for half a second to empty every step on every page. The pad fills red while you hold. Undo brings it back.'],
-    ['STOP', 'Stop the transport.'], ['PLAY', 'Start or stop the transport. Tempo follows the two left side buttons.'],
-  ][x];
-  return { name: T[0], kind: 'CONTROL PAD · BOTTOM ROW', does: T[1], tryit: '' };
+/* ---- the readout: the panel's own description of the pad ---- */
+function show(name, kind, does) { $('#ro-name').textContent = name; $('#ro-kind').textContent = kind; $('#ro-does').textContent = does; }
+async function describe(x, y) {
+  const h = await panel.help(x, y);
+  if (!h) { show(`PAD ${x + 1}, ${y + 1}`, PAGES[P.page] + ' PAGE', P.page === 5 ? "Plinky's own save and load page is drawn here on the device. On this page use SAVE PROJECT and LOAD PROJECT below." : 'Not used on this page.'); return; }
+  const [name, kind, does] = h.split('\n');
+  show(name, kind, does);
 }
-function show(info) {
-  $('#ro-name').textContent = info.name; $('#ro-kind').textContent = info.kind;
-  $('#ro-does').textContent = info.does; $('#ro-try').textContent = info.tryit || '';
-  $('#ro-try').style.display = info.tryit ? '' : 'none';
-}
-function select(b) {
-  if (S.sel >= 0) els[S.sel].classList.remove('sel');
-  if (b) { S.sel = +b.dataset.y * 16 + +b.dataset.x; b.classList.add('sel'); show(describe(+b.dataset.x, +b.dataset.y)); } else S.sel = -1;
-}
-show({ name: 'READOUT', kind: '', does: 'Hover or tap a pad. The first tap switches the sound on.', tryit: '' });
+function hint() { show('READOUT', '', 'Hover or tap a pad: this says what it does, from the panel itself. The first tap on the grid also starts the sound.'); }
 
-/* ---- editing: every change goes to the sequencer too ---- */
-const act = new Map();
-const heldPages = () => [...act.values()].filter(a => a.kind === 'page').map(a => a.x);
-function setCell(i, c) { S.cell[i] = c >>> 0; post({ t: 'cell', track: (i / NS) | 0, step: i % NS, cell: c >>> 0 }); }
-function setPages(n) { S.pages = n; post({ t: 'pages', n }); }
-function snapshot() { S.undo = { cell: S.cell.slice(), pages: S.pages }; }
-function undo() {
-  if (!S.undo) { say('NOTHING TO UNDO'); return; }
-  const u = { cell: S.cell.slice(), pages: S.pages };
-  S.cell.set(S.undo.cell); S.pages = S.undo.pages; S.undo = u; syncPattern(); say('UNDO');
+/* ---- input: pointers are fingers ---- */
+const fingers = new Map(); /* pointerId -> [x, y] */
+const latched = new Set();  /* "x,y" held by Shift-click */
+const pressure = () => Math.round(+$('#pressure').value * 2.55);
+function press(x, y, e) {
+  let p = pressure();
+  if (e && e.pointerType === 'pen' && e.pressure > 0) p = Math.round(e.pressure * 255);
+  panel.touch(x, y, Math.max(20, p));
 }
-const velFrom = e => e && e.pointerType === 'pen' && e.pressure > 0 ? clamp(Math.round(32 + Math.pow(e.pressure, .8) * 95), 1, 127) : velOf(S.pressure);
-
-function withGenerator(fn) {
-  if (!E.gen) { say('ENGINE LOADING...'); return false; }
-  const io = new Uint32Array(E.gen.memory.buffer, E.gen.c12w_io(), 448);
-  io.set(S.cell); fn(E.gen);
-  S.cell.set(new Uint32Array(E.gen.memory.buffer, E.gen.c12w_io(), 448));
-  return true;
-}
-function gen() { /* panel: seed = gen_seed++, density 50, complexity 50, the current style, the current length */
-  snapshot();
-  if (withGenerator(g => g.c12w_generate(S.genSeed, 50, 50, S.style, S.pages))) { S.genSeed = (S.genSeed + 1) & 0xffff; syncPattern(); say(`GENERATED ${STYLES[S.style]}`); } else S.undo = null;
-}
-function mut() { /* panel: seed = (gen_seed << 16) | mut_count++, medium strength, no locks */
-  snapshot();
-  if (withGenerator(g => g.c12w_mutate((((S.genSeed << 16) | (S.mutN & 0xffff)) >>> 0), 1, S.pages))) { S.mutN = (S.mutN + 1) & 0xffff; syncPattern(); say('MUTATED'); } else S.undo = null;
-}
-function copyPage(from, to) {
-  snapshot();
-  for (let t = 0; t < NT; t++) for (let s = 0; s < 16; s++) S.cell[t * NS + to * 16 + s] = S.cell[t * NS + from * 16 + s];
-  syncPattern(); say(`PAGE ${from + 1} COPIED TO ${to + 1}`);
-}
-function nextKit() {
-  S.kit = (S.kit + 1) % KITS.length; S.kitSet = true;
-  post({ t: 'kit', character: S.kit, seed: S.kit * 37, wild: 50 }); say(`KIT ${KITS[S.kit]}`);
-  if (!S.playing) [[0, 110, 0], [5, 80, 170], [3, 105, 340], [5, 80, 510], [0, 110, 680]].forEach(([t, v, ms]) => setTimeout(() => { if (!S.playing) audition(t, v, 0); }, 260 + ms));
-}
-function beat() {
-  S.cell.fill(0);
-  for (const s of [0, 4, 8, 12]) S.cell[0 * NS + s] = mk(110, 0);
-  for (const s of [4, 12]) S.cell[3 * NS + s] = mk(105, 0);
-  for (const s of [2, 6, 10, 14]) S.cell[5 * NS + s] = mk(80, 0);
-  S.pages = 1; S.view = 0; S.undo = null;
-}
-beat();
-
-function down(x, y, e, id) {
-  const now = performance.now();
-  if (y < 7) {
-    const i = y * NS + S.view * 16 + x, was = V(i) > 0;
-    if (!was) { const v = velFrom(e); setCell(i, mk(v, 0)); if (!S.playing) audition(y, v, 0); }
-    act.set(id, { kind: 'step', i, was, t0: now });
-  } else if (y > 7 && y < 15) {
-    const t = y - 8, i = t * NS + S.view * 16 + x;
-    if (V(i)) {
-      const last = (t === 2 || t === 3) ? 5 : 2, k = VR(i) >= last ? 0 : VR(i) + 1;
-      setCell(i, ((S.cell[i] & 0xffff00ff) | ((k ? 128 + k : 0) << 8)) >>> 0);
-      if (!S.playing) audition(t, V(i), k);
-      say(`${TRACKS[t][0]} STEP ${S.view * 16 + x + 1}: ${VARS[k].toUpperCase()}`);
-    }
-  } else if (y === 15) {
-    if (x < 4) {
-      const other = heldPages().find(p => p !== x);
-      if (other !== undefined) copyPage(other, x);
-      else if (S.sticky >= 0 && S.sticky !== x) { copyPage(S.sticky, x); S.sticky = -1; }
-      else { S.view = x; if (e && e.shiftKey) S.sticky = S.sticky === x ? -1 : x; }
-      act.set(id, { kind: 'page', x });
-    } else if (x < 8) { setPages(x - 3); say(`LENGTH ${S.pages * 16} STEPS`); }
-    else if (x === 8) gen();
-    else if (x === 9) mut();
-    else if (x === 10) nextKit();
-    else if (x === 11) { S.style = (S.style + 1) % STYLES.length; say(`STYLE ${STYLES[S.style]}`); }
-    else if (x === 12) undo();
-    else if (x === 13) { S.clrT0 = now; act.set(id, { kind: 'clr' }); tickClr(); }
-    else if (x === 14) stop();
-    else if (x === 15) { S.playing ? stop() : play(); }
+pads.addEventListener('pointerdown', (e) => {
+  const b = e.target.closest('.pad'); if (!b) return;
+  e.preventDefault();
+  startAudio();
+  const x = +b.dataset.x, y = +b.dataset.y, k = x + ',' + y;
+  describe(x, y);
+  if (e.shiftKey) {
+    if (latched.has(k)) { latched.delete(k); panel.touch(x, y, 0); b.classList.remove('sel'); }
+    else { latched.add(k); press(x, y, e); b.classList.add('sel'); }
+    return;
   }
-  render();
-}
-function up(id, e) {
-  const a = act.get(id); if (!a) return; act.delete(id);
-  if (a.kind === 'step') {
-    if (a.was) { if (performance.now() - a.t0 < 300) setCell(a.i, 0); else setCell(a.i, ((S.cell[a.i] & ~0x7f) | velFrom(e)) >>> 0); }
-  } else if (a.kind === 'clr') S.clrT0 = 0;
-  render();
-}
-function tickClr() {
-  if (!S.clrT0) return;
-  if (performance.now() - S.clrT0 >= 500) { snapshot(); S.cell.fill(0); syncPattern(); S.clrT0 = 0; for (const [k, a] of act) if (a.kind === 'clr') act.delete(k); say('CLEARED. UNDO BRINGS IT BACK'); return; }
-  render(); requestAnimationFrame(tickClr);
-}
-
-/* ---- transport: the engine's sequencer when sound is on, a silent timer until then ---- */
-let nextT = 0, raf = 0;
-function play() {
-  S.playing = true; S.pos = -1; post({ t: 'play', on: 1 });
-  if (E.state !== 'on') { nextT = performance.now(); if (!raf) raf = requestAnimationFrame(loop); }
-}
-function stop() { S.playing = false; S.pos = -1; post({ t: 'play', on: 0 }); render(); }
-function loop() {
-  raf = 0; if (!S.playing || E.state === 'on') return;
-  const now = performance.now(); let moved = false;
-  while (now >= nextT) { S.pos = (S.pos + 1) % (S.pages * 16); nextT += 15000 / S.bpm; moved = true; }
-  if (moved) render();
-  raf = requestAnimationFrame(loop);
-}
-function nudge(d) { S.bpm = clamp(S.bpm + d, 30, 300); post({ t: 'tempo', bpm: S.bpm }); S.bpmUntil = performance.now() + 1300; setTimeout(render, 1350); render(); }
-
-/* ---- input ---- */
-$('#grid').addEventListener('pointerdown', startAudio, true);
-$('#grid').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') startAudio(); }, true);
-pads.addEventListener('pointerdown', e => { const b = e.target.closest('.pad'); if (!b) return; select(b); down(+b.dataset.x, +b.dataset.y, e, e.pointerId); });
-for (const ev of ['pointerup', 'pointercancel']) window.addEventListener(ev, e => up(e.pointerId, e));
-pads.addEventListener('pointerover', e => { const b = e.target.closest('.pad'); if (b && !act.size) show(describe(+b.dataset.x, +b.dataset.y)); });
-pads.addEventListener('focusin', e => { const b = e.target.closest('.pad'); if (b) show(describe(+b.dataset.x, +b.dataset.y)); });
-pads.addEventListener('keydown', e => {
+  if (latched.has(k)) return;
+  try { b.releasePointerCapture(e.pointerId); } catch (_) {}
+  fingers.set(e.pointerId, [x, y]);
+  press(x, y, e);
+});
+pads.addEventListener('pointermove', (e) => {
+  const f = fingers.get(e.pointerId);
+  if (f && e.pointerType === 'pen' && e.pressure > 0) panel.touch(f[0], f[1], Math.max(20, Math.round(e.pressure * 255)));
+});
+function lift(e) { const f = fingers.get(e.pointerId); if (!f) return; fingers.delete(e.pointerId); panel.touch(f[0], f[1], 0); }
+for (const ev of ['pointerup', 'pointercancel']) window.addEventListener(ev, lift);
+pads.addEventListener('pointerover', (e) => { const b = e.target.closest('.pad'); if (b && !fingers.size) describe(+b.dataset.x, +b.dataset.y); });
+pads.addEventListener('focusin', (e) => { const b = e.target.closest('.pad'); if (b) describe(+b.dataset.x, +b.dataset.y); });
+pads.addEventListener('keydown', (e) => {
   const b = e.target.closest('.pad'); if (!b) return;
   const x = +b.dataset.x, y = +b.dataset.y;
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) { select(b); down(x, y, e, 'kb'); } return; }
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!e.repeat) { startAudio(); press(x, y); } return; }
   const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key]; if (!d) return;
-  e.preventDefault(); const nx = clamp(x + d[0], 0, 15), ny = clamp(y + d[1], 0, 15), n = els[ny * 16 + nx];
+  e.preventDefault(); const n = els[clamp(y + d[1], 0, 15) * 16 + clamp(x + d[0], 0, 15)];
   b.tabIndex = -1; n.tabIndex = 0; n.focus();
 });
-pads.addEventListener('keyup', e => { if (e.key === 'Enter' || e.key === ' ') up('kb', e); });
-pads.addEventListener('contextmenu', e => e.preventDefault());
+pads.addEventListener('keyup', (e) => { const b = e.target.closest('.pad'); if (b && (e.key === 'Enter' || e.key === ' ')) panel.touch(+b.dataset.x, +b.dataset.y, 0); });
+pads.addEventListener('contextmenu', (e) => e.preventDefault());
 
+/* Plinky's side buttons: tempo on the left, pages on the right */
 const SIDE = {
-  'tempo-up': ['TEMPO UP', 'The top left side button nudges the tempo up (hold to repeat). The grid shows the number for a moment, as on the device.', 1],
-  'tempo-down': ['TEMPO DOWN', 'The bottom left side button nudges the tempo down (hold to repeat).', -1],
-  'page-up': ['PAGE UP', 'The right side buttons move between pages. On the device, up from the grid opens CLATTER 12’s DSP load page. They do nothing on this page.', 0],
-  'page-down': ['PAGE DOWN', 'The right side buttons move between pages. They do nothing on this page.', 0],
+  'tempo-up': ['TEMPO UP', 'Plinky’s top left side button: tempo up (hold to repeat). CLATTER 12 follows Plinky’s tempo and transport.', () => panel.setTempo(clamp(P.tempo + 1, 30, 300))],
+  'tempo-down': ['TEMPO DOWN', 'Plinky’s bottom left side button: tempo down (hold to repeat).', () => panel.setTempo(clamp(P.tempo - 1, 30, 300))],
+  'page-up': ['PAGE UP', 'Plinky’s right side buttons scroll through the panel’s pages (SEQ, SOUND, GEN, MIX, FX, SAVE). On the device, up from SEQ opens the DSP load page.', () => panel.setPage(clamp(P.page - 1, 0, 5))],
+  'page-down': ['PAGE DOWN', 'Plinky’s right side buttons scroll through the panel’s pages. Row 15’s first six pads jump straight to one.', () => panel.setPage(clamp(P.page + 1, 0, 5))],
 };
 for (const id in SIDE) {
   const b = $('#' + id); let t1, t2;
   const stopRep = () => { clearTimeout(t1); clearInterval(t2); };
-  b.addEventListener('pointerdown', () => { show({ name: SIDE[id][0], kind: 'SIDE BUTTON', does: SIDE[id][1], tryit: '' }); const d = SIDE[id][2]; if (!d) return; nudge(d); t1 = setTimeout(() => { t2 = setInterval(() => nudge(d), 90); }, 380); });
+  b.addEventListener('pointerdown', () => { show(SIDE[id][0], 'SIDE BUTTON', SIDE[id][1]); SIDE[id][2](); if (id.startsWith('tempo')) t1 = setTimeout(() => { t2 = setInterval(SIDE[id][2], 90); }, 380); });
   for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, stopRep);
-  b.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && SIDE[id][2]) { e.preventDefault(); nudge(SIDE[id][2]); } });
-  b.addEventListener('pointerover', () => show({ name: SIDE[id][0], kind: 'SIDE BUTTON', does: SIDE[id][1], tryit: '' }));
+  b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); SIDE[id][2](); } });
+  b.addEventListener('pointerover', () => show(SIDE[id][0], 'SIDE BUTTON', SIDE[id][1]));
 }
+for (const b of document.querySelectorAll('#pagebar button')) b.addEventListener('click', () => panel.setPage(+b.dataset.page));
 
 const pr = $('#pressure'), prOut = $('#pressure-out');
-const setPr = () => { S.pressure = +pr.value; prOut.textContent = 'VEL ' + velOf(S.pressure); };
+const setPr = () => { prOut.textContent = String(pressure()); };
 pr.addEventListener('input', setPr); setPr();
-$('#face').addEventListener('click', e => { S.face = !S.face; e.currentTarget.setAttribute('aria-pressed', S.face); $('#board').classList.toggle('faceplate', S.face); for (const b of els) b._k = null; render(); });
-$('#reset').addEventListener('click', () => { stop(); beat(); syncPattern(); say('DEFAULT BEAT'); });
+$('#face').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', on); $('#board').classList.toggle('faceplate', on); });
 $('#sound').addEventListener('click', () => {
-  if (E.state === 'off') startAudio();
-  else if (E.state === 'on') { E.muted = !E.muted; E.gain.gain.value = E.muted ? 0 : 1; sound(); }
+  if (P.state === 'off') startAudio();
+  else if (P.state === 'on') { P.muted = !P.muted; P.gain.gain.value = P.muted ? 0 : 1; sound(); }
+});
+$('#release').addEventListener('click', () => { latched.clear(); for (const b of els) b.classList.remove('sel'); panel.releaseAll(); });
+$('#save').addEventListener('click', async () => {
+  const text = await panel.save();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  a.download = 'clatter12-project.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  say('PROJECT SAVED: THE SAME JSON PLINKY WRITES');
+});
+$('#load').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const ok = await panel.load(await f.text());
+  say(ok ? 'PROJECT LOADED' : 'NOT A CLATTER 12 PROJECT: NOTHING CHANGED');
+  e.target.value = '';
 });
 
-window.C12PAGE = { S, E }; /* for the page's own tests */
-loadEngine(); sound(); render();
+window.C12PAGE = { P, panel }; /* for the page's own tests */
+hint(); sound(); loadPanel();
 })();

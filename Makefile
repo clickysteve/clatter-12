@@ -19,7 +19,7 @@ PY ?= python3
 ARM_GXX ?= $(shell command -v arm-none-eabi-g++ 2>/dev/null || ls $$(brew --prefix arm-none-eabi-gcc@8 2>/dev/null)/bin/arm-none-eabi-g++ 2>/dev/null)
 ARM_SIZE ?= $(shell command -v arm-none-eabi-size 2>/dev/null)
 
-CORE := core/c12_engine.c core/c12_engine.h core/c12_resampler.c core/c12_resampler.h core/c12_exports.c
+CORE := $(wildcard core/c12_*.c core/c12_*.h)
 GEN_DEPS := tools/amalgamate.py tools/plinky_macros.txt $(CORE) stubs/sysinc/*.h $(POCKET)/lxr/CLATTER_REVISION
 
 # The native C reference: the generated engine text itself, compiled as C with the platform's C
@@ -33,7 +33,7 @@ CXXFLAGS_HOST := -std=gnu++17 -O2 -ffp-contract=off -Wall -Wno-unused-function -
 M33_FLAGS := -std=gnu++17 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 \
 	-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wno-psabi
 
-.PHONY: all panel test m33 bench pocket-test wasm test-wasm site-serve clean
+.PHONY: all panel test m33 m33-bench bench pocket-test wasm test-wasm site-serve clean
 all: panel test
 
 $(BUILD)/c12_engine.inc $(BUILD)/c12_engine_c.c: $(GEN_DEPS)
@@ -101,7 +101,7 @@ M33_VARIANTS := clatter_12 clatter_12_sram clatter_12_psram
 m33: $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 	@test -n "$(ARM_GXX)" || (echo "arm-none-eabi-g++ not found (set ARM_GXX)"; exit 1)
 	@for v in $(M33_VARIANTS); do \
-		printf '#include "plinky_sim.h"\n#include "%s.cpp"\n' $$v > $(BUILD)/m33_$$v.cpp; \
+		printf '#include <new>\n#include "plinky_sim.h"\n#include "%s.cpp"\n// as the firmware does: the panel object constructed in its arena (so its code is emitted and counted)\npanel_t* c12_m33_construct(void* arena) { return new (arena) clatter12(); }\n' $$v > $(BUILD)/m33_$$v.cpp; \
 		echo "$(ARM_GXX) ... $$v"; \
 		$(ARM_GXX) $(M33_FLAGS) -Werror=return-type -Isim -I$(BUILD) -c $(BUILD)/m33_$$v.cpp -o $(BUILD)/m33_$$v.o || exit 1; \
 	done
@@ -119,33 +119,48 @@ WASM_CFLAGS := --target=wasm32 -std=gnu11 -O2 -ffreestanding -fno-builtin -w -Ds
 	-Icore -I$(POCKET)/engine -I$(POCKET)/seq -I$(POCKET)/lxr/shim -I$(POCKET)/lxr/shim/libc \
 	-include stdint.h -include stddef.h -include string.h -include stdlib.h -include stdio.h -include math.h \
 	-DC12_LXR_CODE= -DC12_LXR_DATA=
-WASM_OUT := docs/assets/c12.wasm
-$(BUILD)/wasm/engine.o: $(BUILD)/c12_engine_c.c
+# The project page runs the panel itself: build/clatter_12_full.cpp (engine and glue, exactly as
+# pasted into Plinky's IDE) with the simulator's stand-in for the Plinky API (sim/), as one module,
+# docs/assets/c12panel.wasm. Committed, so the page needs no build.
+WASM_CXX ?= $(WASM_CC)
+WASM_PANEL := docs/assets/c12panel.wasm
+WASMXX_FLAGS := --target=wasm32 -std=gnu++17 -O2 -ffreestanding -fno-exceptions -fno-rtti -nostdlibinc -nostdinc++ \
+	-isystem sim/wasm/include -Isim -I$(BUILD) -DC12_WASM -w
+$(BUILD)/wasm/panel.o: sim/wasm_panel.cpp sim/plinky_sim.h sim/panel_help.h $(BUILD)/clatter_12_full.cpp
 	@mkdir -p $(BUILD)/wasm
-	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
-$(BUILD)/wasm/glue.o: core/c12_wasm.c core/c12_engine.h
+	$(WASM_CXX) $(WASMXX_FLAGS) -c $< -o $@
+$(BUILD)/wasm/sim.o: sim/plinky_sim.cpp sim/plinky_sim.h
 	@mkdir -p $(BUILD)/wasm
-	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
+	$(WASM_CXX) $(WASMXX_FLAGS) -c $< -o $@
+$(BUILD)/wasm/libc.o: sim/wasm/libc.c
+	@mkdir -p $(BUILD)/wasm
+	$(WASM_CC) --target=wasm32 -std=gnu11 -O2 -ffreestanding -nostdlibinc -isystem sim/wasm/include -w -c $< -o $@
 $(BUILD)/wasm/libm.o: $(POCKET)/lxr/bridge/libm.c
 	@mkdir -p $(BUILD)/wasm
 	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
-$(WASM_OUT): $(BUILD)/wasm/engine.o $(BUILD)/wasm/glue.o $(BUILD)/wasm/libm.o
-	$(WASM_LD) $^ -o $@ --no-entry --export-memory --gc-sections --strip-all -z stack-size=65536
-wasm: $(WASM_OUT)
-# Reference data from the native generator, and the native render of the same scenario the browser
-# build is held to (tests/scenario.inc).
-$(BUILD)/export_patterns: tests/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a
-	$(CC) -std=gnu11 -O2 -w -I$(POCKET)/engine -I$(POCKET)/seq tests/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a -lm -o $@
-$(BUILD)/patterns.bin: $(BUILD)/export_patterns
-	$< $@ > $(BUILD)/patterns_meta.json
-test-wasm: $(WASM_OUT) $(BUILD)/patterns.bin $(BUILD)/equiv_c
-	$(BUILD)/equiv_c $(BUILD)/test/equiv_c.raw
+$(WASM_PANEL): $(BUILD)/wasm/panel.o $(BUILD)/wasm/sim.o $(BUILD)/wasm/libc.o $(BUILD)/wasm/libm.o
+	$(WASM_LD) $^ -o $@ --no-entry --export-memory --export=__wasm_call_ctors --gc-sections --strip-all -z stack-size=262144
+wasm: $(WASM_PANEL)
+test-wasm: $(WASM_PANEL)
 	node tests/test_wasm.mjs
 site-serve:
 	$(PY) -m http.server 8000 --directory docs
 
 bench: $(BUILD)/bench
 	$(BUILD)/bench
+
+# Instructions per output block on a Cortex-M33, counted by QEMU (mps2-an505, -icount): the
+# engine as C (build/c12_engine_c.c) with newlib, everything in SRAM. An estimate, not a Plinky:
+# QEMU counts instructions, not cycles (see TESTING.md). Needs qemu-system-arm and arm-none-eabi-gcc.
+ARM_GCC ?= $(shell command -v arm-none-eabi-gcc 2>/dev/null)
+QEMU_ARM ?= $(shell command -v qemu-system-arm 2>/dev/null)
+$(BUILD)/m33_bench.elf: tests/m33/bench.c tests/m33/startup.c tests/m33/link.ld $(BUILD)/c12_engine_c.c
+	$(ARM_GCC) -std=gnu11 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 -ffunction-sections -fdata-sections -w \
+		-include stdint.h -include stddef.h -include string.h -include stdlib.h -include stdio.h -include math.h -include assert.h \
+		-DC12_LXR_CODE= -DC12_LXR_DATA= -Icore -I$(POCKET)/engine -I$(POCKET)/seq --specs=rdimon.specs -nostartfiles \
+		-T tests/m33/link.ld tests/m33/startup.c tests/m33/bench.c $(BUILD)/c12_engine_c.c -lm -lrdimon -Wl,--gc-sections -o $@
+m33-bench: $(BUILD)/m33_bench.elf
+	$(QEMU_ARM) -M mps2-an505 -cpu cortex-m33 -nographic -semihosting -icount shift=0,align=off -kernel $<
 
 pocket-test:
 	$(MAKE) -C $(POCKET) test

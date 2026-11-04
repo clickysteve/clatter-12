@@ -94,8 +94,8 @@ main > section:last-of-type { padding-bottom: clamp(40px, 7vw, 88px); }
 .readout-try { margin-top: 12px !important; padding-top: 10px; border-top: 1px solid #9a9a94; font-size: 14.5px; color: #26261f; }
 
 .board { position: relative; }
-.board.faceplate { padding-left: 104px; }
-.rows { position: absolute; right: calc(100% + 12px); top: 6.1cqw; height: 87.8cqw; display: grid; grid-template-rows: repeat(16, 1fr); font: 400 10.5px/1 var(--pixel); text-align: right; color: var(--dim); }
+.board.faceplate { padding-left: 132px; }
+.rows { position: absolute; right: calc(100% + 12px); top: 6.2cqw; height: 94.5cqw; display: grid; grid-template-rows: repeat(16, 1fr); font: 400 10.5px/1 var(--pixel); text-align: right; color: var(--dim); }
 .rows span { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
 .rows span::after { content: ''; width: 8px; height: 8px; background: var(--k, transparent); }
 
@@ -167,3 +167,14 @@ pre { margin: 12px 0 0; padding: 12px 14px; border: 1px solid var(--line); backg
   .window.wide { background: var(--panel); }
   .side { display: none; }
 }
+
+/* pages and the save page (the panel's own pages, as row 15 and Plinky's side buttons reach them) */
+.pagebar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.pagebar button { min-height: 36px; padding: 6px 12px; border: 2px solid var(--line); background: #000; color: var(--dim); font: 400 13px/1.2 var(--pixel); cursor: pointer; }
+.pagebar button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #000; }
+.panel-face { position: relative; }
+.savepage { position: absolute; inset: 22% 8%; display: grid; place-items: center; padding: 16px; border: 2px dashed var(--amber); background: rgba(0,0,0,.82); color: var(--ink); font-size: 15px; text-align: center; }
+.savepage[hidden] { display: none; }
+.savepage b { display: block; margin-bottom: 8px; color: var(--amber); font: 400 16px/1.2 var(--pixel); }
+.filechip { position: relative; display: inline-flex; align-items: center; color: var(--ink) !important; }
+.filechip input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }

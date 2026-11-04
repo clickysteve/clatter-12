@@ -10,14 +10,16 @@ jobs:
         with:
           submodules: true   # clatter-pocket only; its own fm1_open submodule is not needed
       - name: Tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld make python3 gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld make python3 gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib qemu-system-arm
       - name: Published Plinky API (pinned)
         run: sh tools/fetch-plinky-headers.sh || echo "::warning::Plinky API bundle changed or unreachable; check_api will report NOT CHECKED or fail"
       - name: Panel and host tests
         run: make CC=clang CXX=clang++ all
       - name: Cortex-M33 compile
         run: make CC=clang CXX=clang++ m33
-      - name: Web build and its tests (WebAssembly engine against the native one)
+      - name: Instructions per audio block on a Cortex-M33 (QEMU; an estimate, not a Plinky)
+        run: make CC=clang CXX=clang++ m33-bench
+      - name: Web build and its tests (the panel as WebAssembly)
         run: make CC=clang CXX=clang++ WASM_CC=clang WASM_LD=wasm-ld test-wasm
       - uses: actions/upload-artifact@v4
         with:

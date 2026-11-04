@@ -56,6 +56,13 @@ for n in sorted(called):
 import os
 bundle = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "plinky_library.h")
 api = open(bundle).read() if os.path.exists(bundle) else None
+if api is None:
+    # Without the published bundle, the Plinky names the glue uses are those the simulator declares
+    # (tools/check_api.py checks those against the bundle whenever it is available).
+    sim_h = os.path.join(os.path.dirname(bundle), "..", "sim", "plinky_sim.h")
+    api = open(sim_h).read()
+    print("check_link: Plinky API bundle missing; API names checked against sim/plinky_sim.h instead")
+LIBC = {"printf", "puts", "snprintf", "putchar"}
 nm = shutil.which("arm-none-eabi-nm")
 objdump = shutil.which("arm-none-eabi-objdump")
 for obj in sys.argv[2:]:
@@ -70,8 +77,10 @@ for obj in sys.argv[2:]:
         # for an inline API detail (sim_*): provided by the firmware on the device
         name = u.split("(")[0]
         return name.startswith("sim_") or (api is not None and re.search(r"\b%s\b" % re.escape(name), api))
+    def cxx_runtime(u):
+        return u.startswith("operator delete") or u.startswith("operator new")
     bad = [u for u in und if not (u.startswith("__aeabi_") or u in MEM or u in KNOWN_LIBM or u in BUILTIN_OK
-                                  or plinky_api(u))]
+                                  or u in LIBC or cxx_runtime(u) or plinky_api(u.split("::")[0]) or plinky_api(u))]
     if bad:
         print("check_link: %s needs unknown symbols: %s" % (obj, " ".join(bad)))
         failed = True

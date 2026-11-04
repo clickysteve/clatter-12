@@ -54,6 +54,12 @@ LXR_DSP = [
     "Soundengine/DSPAudio/snapEg.c",
     "Soundengine/DSPAudio/squareRootLut.c",
     "Soundengine/DSPAudio/transientGenerator.c",
+    # The LXR FX bus's master distortion, ring modulator and compressor, unchanged: CLATTER 12 runs
+    # them itself on the tracks routed to its FX chain (core/c12_engine.c). The bus (FxBus.c) and
+    # its delay, with 64 KB of half-float memory, stay out, as in Pocket's FM-1 build (fx_off.c).
+    "Soundengine/DSPAudio/FX/Distortion.c",
+    "Soundengine/DSPAudio/FX/Ringmod.c",
+    "Soundengine/DSPAudio/FX/Compressor.c",
 ]
 LXR_TABLES = ["Soundengine/DSPAudio/transientTables.c", "Soundengine/DSPAudio/wavetable.c"]
 LXR_PARAM_ARRAY = ["Soundengine/MIDI/ParameterArray.c"]
@@ -68,7 +74,7 @@ POCKET_SRC = [
 ]
 POCKET_PACKED = ["engine/lxr_tables_packed.c", "engine/lxr_tables_unpack.c", "engine/pocket_param_table.c"]
 
-CORE_SRC = ["core/c12_resampler.c", "core/c12_engine.c", "core/c12_exports.c"]
+CORE_SRC = ["core/c12_resampler.c", "core/c12_engine.c", "core/c12_params.c", "core/c12_kitgen.c", "core/c12_exports.c"]
 
 INCLUDES = [
     os.path.join(ROOT, "core"),
@@ -97,6 +103,15 @@ def sources(tables):
 # renames a file's private names for the length of that file only (or ends a file's macro), so
 # the code compiled is the same code with distinct spellings.
 UNITY_AROUND = {
+    # the master distortion's file-scope helpers (clamp, lerp, ...) are named as others are
+    "lxr/upstream/Core/Src/Soundengine/DSPAudio/FX/Distortion.c": (
+        "".join("#define %s fxdist_%s\n" % (n, n) for n in ["clamp", "lerp", "fnms", "diode", "foldback"]),
+        "".join("#undef %s\n" % n for n in ["clamp", "lerp", "fnms", "diode", "foldback"])),
+    # fx_off.c stands in for the FX setters the parameter handler calls; with the real compressor
+    # and ring modulator in the build (above), its stand-ins take other names for its length.
+    "engine/fx_off.c": ("#define Compressor_setRatio pocket_fxoff_Compressor_setRatio\n"
+                        "#define Ringmod_setWave pocket_fxoff_Ringmod_setWave\n",
+                        "#undef Compressor_setRatio\n#undef Ringmod_setWave\n"),
     "seq/pocket_seq.c": ("", "#undef CLOSED_HAT\n#undef OPEN_HAT\n"),
     # pocket_gen.c and pocket_kit.c each have a static chance() with different parameters: C++
     # would quietly overload them, C rejects them. Distinct names keep both languages honest.
@@ -368,6 +383,26 @@ static inline float fmaf(float a, float b, float c) { return __builtin_fmaf(a, b
 #else
 static inline float fmaf(float a, float b, float c) { return (float)((double)a * (double)b + (double)c); }
 #endif
+// The LXR FX bus's compressor (logf per sample) and fold distortion (fmod) need two functions no
+// Plinky panel is known to link with: defined here, in single precision, so nothing depends on
+// Plinky's C libraries having them. logf: mantissa in [0.71, 1.41), atanh series, |error| < 2e-7.
+static inline float logf(float x) {
+  if (!(x > 0.f)) return x == 0.f ? -__builtin_inff() : __builtin_nanf("");
+  union { float f; unsigned u; } v;
+  v.f = x;
+  int e = (int)((v.u >> 23) & 255u) - 127;
+  v.u = (v.u & 0x7fffffu) | 0x3f800000u;
+  float m = v.f;
+  if (m > 1.41421356f) { m *= 0.5f; e++; }
+  const float t = (m - 1.f) / (m + 1.f), t2 = t * t;
+  const float s = 2.f * t * (1.f + t2 * (0.333333343f + t2 * (0.2f + t2 * (0.142857149f + t2 * 0.111111112f))));
+  return s + (float)e * 0.693147182f;
+}
+static inline float fmodf(float x, float y) { return y == 0.f ? __builtin_nanf("") : x - __builtin_truncf(x / y) * y; }
+// the same in the names the FX code calls, on floats (CLATTER's single-precision build)
+static inline float fmod(float x, float y) { return fmodf(x, y); }
+static inline float fma(float a, float b, float c) { return fmaf(a, b, c); }
+static inline float exp(float x) { return expf(x); }
 """
 
 

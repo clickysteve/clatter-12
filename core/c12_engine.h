@@ -41,6 +41,7 @@ struct c12_engine_stats {
 	uint32_t lxr_max_per_out;/* most LXR blocks rendered in one output block (1 or 2 at 32 kHz) */
 	uint32_t clipped;        /* output samples saturated */
 	uint32_t underruns;      /* output blocks the resampler could not fill (must stay 0) */
+	uint32_t strokes;        /* ratchet strokes after a step's first */
 };
 
 /* The LXR's constant tables (sine, triangle/saw/square wavetables, transient samples) are kept
@@ -75,6 +76,79 @@ unsigned c12_kit_pump(unsigned budget);
 /* A kit from CLATTER Pocket's designer: `character` below POCKET_KIT_CHARACTERS, or the
  * firmware's init kit when character < 0. Written to `kit` (C12_KIT_PARAMS bytes). */
 void c12_kit_design(uint8_t* kit, int character, uint32_t seed, unsigned wildness);
+
+/* ---- steps: CLATTER 12's bits of a sequencer cell -------------------------------------- */
+/* Pocket's cell (pocket_seq.h) uses bits 0-19: velocity, tone (note or variation), condition. The
+ * sequencer reads nothing above them, so CLATTER 12 keeps a step's ratchet there, where it moves,
+ * copies, undoes and saves with the step: bits 20-22 the number of strokes (C12_RATCHET_*), 23-24
+ * how they are spaced in the step, 25-26 how their velocity runs. A cell without them plays once,
+ * exactly as Pocket plays it. */
+enum { C12_RATCHET_1, C12_RATCHET_2, C12_RATCHET_3, C12_RATCHET_4, C12_RATCHET_6, C12_RATCHET_8, C12_RATCHETS };
+enum { C12_ROLL_EVEN, C12_ROLL_ACCEL, C12_ROLL_DECEL, C12_ROLL_RANDOM, C12_ROLL_SHAPES };
+/* velocity: CLATTER Web's ratchet (each stroke 12 % softer), and its ROLLS shapes */
+enum { C12_RAMP_DECAY, C12_RAMP_CRESC, C12_RAMP_DECRESC, C12_RAMP_HUMAN, C12_RAMPS };
+#define C12_CELL_RATCHET(cell) ((unsigned)((cell) >> 20 & 7u))
+#define C12_CELL_ROLL(cell) ((unsigned)((cell) >> 23 & 3u))
+#define C12_CELL_RAMP(cell) ((unsigned)((cell) >> 25 & 3u))
+#define C12_CELL_EXT_MASK (0x7fu << 20)
+#define C12_CELL_WITH_EXT(cell, ratchet, roll, ramp) \
+	(((cell) & ~C12_CELL_EXT_MASK) | ((uint32_t)(ratchet) & 7u) << 20 | ((uint32_t)(roll) & 3u) << 23 | ((uint32_t)(ramp) & 3u) << 25)
+/* strokes of a ratchet index */
+unsigned c12_ratchet_strokes(unsigned ratchet);
+
+/* ---- mixer (control context writes single bytes; the audio context reads them) ---------- */
+#define C12_TRACKS 7
+#define C12_LEVEL_UNITY 100 /* level 0-127: gain (level / 100)^2, so 127 is +4.2 dB, 50 is -12 dB */
+void c12_mix_set_level(int track, int level);
+void c12_mix_set_mute(unsigned mask);   /* bit per track */
+void c12_mix_set_solo(unsigned mask);
+void c12_mix_set_send(int track, int delay, int reverb); /* 0-127 into Plinky's delay and reverb */
+void c12_mix_set_route(unsigned mask);  /* tracks through the FX chain (bit per track) */
+void c12_mix_set_master(int level);     /* 0-127, as a track level */
+/* Whether a track is heard now (mute and solo). */
+int c12_mix_audible(int track);
+
+/* ---- FX (control context sets values; the audio context applies them at a block start) --- */
+/* The chain, in this order, on the tracks routed to it: the LXR-02 firmware's own master
+ * distortion, ring modulator and compressor (DSPAudio/FX, unchanged), each with its dry/wet.
+ * Then on the whole mix: CLATTER 12's bit reduction and its output limiter. Sample-rate reduction
+ * is the LXR's own: VOICE_DECIMATION_ALL, every voice's decimator. Off (wet 0) costs nothing. */
+enum {
+	C12_FX_DRIVE_WET, C12_FX_DRIVE_TYPE, C12_FX_DRIVE_AMOUNT, C12_FX_DRIVE_TONE, C12_FX_DRIVE_LEVEL,
+	C12_FX_RING_WET, C12_FX_RING_FREQ,
+	C12_FX_COMP_WET, C12_FX_COMP_THRESH, C12_FX_COMP_RATIO, C12_FX_COMP_ATTACK, C12_FX_COMP_RELEASE, C12_FX_COMP_GAIN,
+	C12_FX_CRUSH_BITS, C12_FX_RATE, C12_FX_LIMITER,
+	C12_FX_PARAMS
+};
+/* Value ranges: _WET 0-100 (%), _TYPE 0-2 (TUBE, FOLD, RAT), _RATIO 0-5 (1:1 2:1 3:1 4:1 6:1 8:1),
+ * CRUSH_BITS 4-16 (16 = off), RATE 0-127 (127 = full rate), LIMITER 0-1, the rest 0-127 as the
+ * LXR's FX P1-P4 (value / 127). */
+void c12_fx_set(int fx, int value);
+int c12_fx_get(int fx);
+int c12_fx_max(int fx);
+int c12_fx_min(int fx);
+
+/* ---- sends to Plinky's own delay and reverb ----------------------------------------------- */
+/* Mono, at the output rate, for the frames of the last c12_engine_render (int, full scale
+ * 32767), ready for mix_buffers_t delaysend / reverbsend. NULL until a send is non-zero. */
+const int32_t* c12_engine_send(int which); /* 0 delay, 1 reverb */
+
+/* ---- measurement -------------------------------------------------------------------------- */
+/* A microsecond clock (time_us on the Plinky) for per-stage timing of c12_engine_render, or NULL. */
+typedef uint32_t (*c12_clock_fn)(void);
+void c12_engine_set_clock(c12_clock_fn fn);
+struct c12_engine_profile {
+	uint32_t calls;
+	uint32_t lxr_us;     /* LXR voices and sequencer (pocket_lxr_render_q23) */
+	uint32_t mix_us;     /* CLATTER 12's mix, FX, limiter */
+	uint32_t rs_us;      /* rate conversion and output */
+	uint32_t total_max_us;
+	uint32_t limited;    /* samples the limiter turned down */
+	uint32_t peak;       /* largest output |sample| since the last read, 0..32767 */
+	uint16_t track_peak[C12_TRACKS]; /* each voice's largest |sample|, by its track */
+};
+/* Copies and resets (counters restart). */
+void c12_engine_profile_read(struct c12_engine_profile* out);
 
 #ifdef __cplusplus
 }
