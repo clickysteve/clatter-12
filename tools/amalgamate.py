@@ -338,6 +338,39 @@ def postprocess(text):
     return text
 
 
+# Unsuffixed floating literals are double in C, so `x * 0.5` on a float computes in double: on the
+# RP2350 (single-precision FPU) a software call per operation, on the audio path (envelopes,
+# filters, mixer). CLATTER Pocket's single-precision build makes them float with clang's
+# -cl-single-precision-constant; Plinky's compiler flags cannot be set, so the text is changed
+# instead: every unsuffixed floating literal outside string and character literals gets an `f`.
+FLOAT_LIT_RE = re.compile(r"(?<![\w.])((?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)(?![\w.])")
+STRING_RE = re.compile(r"\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'")
+
+
+def single_precision_constants(text):
+    out, last, n = [], 0, 0
+    for m in STRING_RE.finditer(text):
+        part, k = FLOAT_LIT_RE.subn(r"\1f", text[last:m.start()])
+        out.append(part)
+        out.append(m.group(0))
+        n += k
+        last = m.end()
+    part, k = FLOAT_LIT_RE.subn(r"\1f", text[last:])
+    out.append(part)
+    return "".join(out), n + k
+
+
+# Plinky's WebAssembly C library (the IDE's Test build) has no fmaf: the first Test of CLATTER 12
+# failed to link on it. The LXR calls it per sample (filters, snare mix). CLATTER's own definition
+# (lxr/shim/libc/math.h) everywhere but on an FPU with a fused multiply-add (the Cortex-M33's VFMA).
+CXX_PRELUDE = """#if defined(__ARM_FEATURE_FMA)
+static inline float fmaf(float a, float b, float c) { return __builtin_fmaf(a, b, c); }
+#else
+static inline float fmaf(float a, float b, float c) { return (float)((double)a * (double)b + (double)c); }
+#endif
+"""
+
+
 def plinky_macro_guard(text, names_file):
     if not os.path.exists(names_file):
         return "", ""
@@ -366,6 +399,7 @@ def main():
     text = postprocess(preprocess(sources(a.tables), defines, a.cc))
     text = apply_fixes(text, CXX_FIXES + (PACKED_FIXES if a.tables == "packed" else []))
     text, rewritten = rewrite_designators(text, a.cc)
+    text, literals = single_precision_constants(text)
     push, pop = plinky_macro_guard(text, os.path.join(ROOT, "tools", "plinky_macros.txt"))
 
     rev = open(os.path.join(POCKET, "lxr", "CLATTER_REVISION")).read().strip() if os.path.exists(
@@ -385,6 +419,7 @@ def main():
         f.write(head)
         f.write(push)
         f.write("namespace c12 {\n")
+        f.write(CXX_PRELUDE)
         f.write(text)
         f.write("\n} // namespace c12\n")
         f.write(pop)

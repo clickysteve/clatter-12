@@ -63,7 +63,7 @@ than needed, `underruns` counted). About 4 100 multiply-adds per output block (n
 
 | | Size (GCC, Cortex-M33) | Where |
 |---|---|---|
-| code | 54 KB (`clatter_12_sram.cpp`: 34 KB flash + 10 KB SRAM) | flash / `.time_critical` SRAM |
+| code | 51 KB (`clatter_12_sram.cpp`: 33 KB flash + 9.4 KB SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, param table) | 21 KB | flash |
 | LXR tables, unpacked | 102 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
 | other static state (voices, event ring, patterns, converter) | 28 KB | static SRAM |
@@ -79,7 +79,10 @@ CLATTER 12's C files as C, with empty C-library headers (`stubs/sysinc`) so noth
 library is inlined, and as GCC would (`-U__clang__`); wraps the result in `namespace c12` so no LXR
 name can meet a Plinky symbol; maps the LXR's TCM section attributes to `C12_LXR_CODE`; guards
 any Plinky macro that also names something in the engine; and applies a short list of rewrites
-for C constructs C++ (or GCC's C++) rejects. Every rewrite states how many times it must match, so a
+for C constructs C++ (or GCC's C++) rejects. It also makes every unsuffixed floating literal
+`float` (what Pocket's single-precision build does with `-cl-single-precision-constant`; Plinky's
+flags cannot be set), so no software double-precision call remains on the RP2350, and defines
+`fmaf`, which Plinky's WebAssembly C library lacks. Every rewrite states how many times it must match, so a
 change upstream stops the build rather than slipping through. Array designators are rewritten in
 index order with indices evaluated by compiling the C text, not guessed. `tests/test_authentic`
 compares the result with Pocket's own build of the same files.

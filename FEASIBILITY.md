@@ -124,6 +124,7 @@ sizes. See TESTING.md. None of this is hardware verification.
 3. **Source size.** The generated panel is ~306 KB. Another panel author reports the flash endpoint
    rejecting uploads over ~200 KB; Plinky's developer describes the limit as arbitrary and raisable.
    Ask Plinky first; otherwise shrink (identifier compaction, dropping unused LXR code paths).
+   The IDE's **Test** (emulator) build accepted the whole file on the first try; Flash is untried.
 4. **Compiler flags unknown.** Plinky's flags are not published. The amalgamation compiles with
    clang (C++17) and GCC 8.5 (Cortex-M33); a different GCC or `-std` may need further rewrites, which
    the amalgamator's checked-rewrite mechanism is made for. Without `-ffast-math` (likely), noise
@@ -134,4 +135,4 @@ sizes. See TESTING.md. None of this is hardware verification.
    community library, which publishes prebuilt UF2s) needs Plinky's firmware licence to be
    GPL-compatible or an arrangement with the LXR copyright holder. Personal builds are unaffected.
    This needs an answer from Plinky before a community-library submission; it is not legal advice.
-6. **No device, no emulator access here.** Everything Plinky-side is untested.
+6. **No device here.** The IDE has been used once by the owner: CLATTER 12 compiled with Plinky's toolchain and failed to link on a missing `fmaf` (fixed since, not yet re-tested). Everything else Plinky-side is untested.

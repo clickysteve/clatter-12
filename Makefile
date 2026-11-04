@@ -106,6 +106,7 @@ m33: $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 		$(ARM_GXX) $(M33_FLAGS) -Werror=return-type -Isim -I$(BUILD) -c $(BUILD)/m33_$$v.cpp -o $(BUILD)/m33_$$v.o || exit 1; \
 	done
 	$(PY) tools/m33_sizes.py $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
+	$(PY) tools/check_link.py $(BUILD)/c12_engine.inc $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 
 bench: $(BUILD)/bench
 	$(BUILD)/bench
