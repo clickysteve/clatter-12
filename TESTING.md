@@ -37,11 +37,28 @@ First **Test** in the Plinky 12 code editor (WebAssembly build, Debian clang 21.
 has), and **failed to link**: `undefined symbol: fmaf`, Plinky's WebAssembly C library has none.
 Fixed by defining `fmaf` in the engine (`tools/amalgamate.py`, `CXX_PRELUDE`) and by
 `tools/check_link.py`, which now fails the build for any math function not known to exist on Plinky.
-Not yet re-tested in the IDE.
+Re-tested the same day: **links and runs in Plinky's emulator** (wasm build `7df25fb`, 2026-11-02).
+
+What the emulator log shows (owner's run, about four minutes of playing and one reload):
+
+- `clatter12: engine up, out rate 32000 Hz`: bring-up works, and `SAMPLE_FREQ` is 32 000 there.
+- About 100 000 output blocks with **0 underruns** and at most 2 LXR blocks per output block; the
+  LXR/output ratio stays 1.379, as in the host tests.
+- **`dsp avg 0 max 0 us` throughout.** The timing readout does not work in the emulator
+  (`time_us()` evidently does not advance across an audio block there), so the DSP page and log say
+  nothing about CPU load until the panel runs on a device. The cause is not confirmed.
+- **Clipping: 17 saturated samples in about four minutes**, starting when the owner began editing
+  (the engine's 16-bit stage, before Plinky's output chain). The host session and tests had none.
+  Not yet addressed: more headroom or a soft limiter (ROADMAP).
+- The `failed to open json preset file /PLINKY/BANKS/...` lines are the stock Blocks panel looking
+  for sound banks missing from the emulator's disk image. They are not CLATTER 12's.
+
+This log does not say how it sounded or whether touches and LEDs behaved: not yet recorded.
 
 ## Untested
 
-Running in Plinky's emulator, and anything on a Plinky 12. Specifically core-1 CPU load, linking beside
+Whether it sounds and plays right in the emulator (not reported), and anything on a Plinky 12.
+Specifically core-1 CPU load, linking beside
 the firmware (static SRAM), PSRAM table speed, the IDE's source-size limit and compiler flags,
 touch latency, LED update cost, `SAMPLE_FREQ`'s actual value, transport behaviour with external
 clock, and audio level through Plinky's output stage.

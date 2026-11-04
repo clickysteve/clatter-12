@@ -10,7 +10,11 @@ Plinky transport and tempo; DSP load page and log; tests; Cortex-M33 compile.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 
-- [ ] Run `clatter_12.cpp` in Plinky's IDE emulator; fix whatever its compiler rejects.
+- [x] Run `clatter_12.cpp` in Plinky's IDE emulator (done 2026-11-04: compiles, links, runs; see TESTING.md).
+- [ ] Clipping seen in the emulator (17 samples in ~4 min of editing): more headroom than the current
+      -3 dB, or a soft limiter before the 16-bit stage; then check the level through Plinky's output.
+- [ ] Make the load readout work: `time_us()` gave 0 per block in the emulator. Try counting blocks
+      per UI frame or another block timer; verify on a device.
 - [ ] First device run: link result, DSP page/log numbers idle and busy, crackle or not.
 - [ ] If over budget: `_sram` variant; profile per stage (`time_us` around LXR render and converter);
       skip silent voices; shorter converter. Only then consider rate or voice changes, measured.

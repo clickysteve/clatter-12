@@ -26,7 +26,7 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 | LXR engine | all six voices / seven triggers, Pocket's kits, variations, generator; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
 | Sound, host | matches CLATTER Pocket's reference build: every voice's spectrum within 0.03 dB per third-octave band, envelopes within 0.1 dB (95 % of 10 ms frames); 32 kHz output matches an ideal conversion of the native-rate LXR at 50-79 dB SNR |
 | Panel, simulated | 16-step grid for seven tracks with pressure velocity, variation lanes, four pages with copy, length 16-64, GEN / MUT / KIT / STYLE / UNDO / CLR, play/stop with Plinky's transport and tempo: 36 scripted checks pass |
-| Plinky IDE | compiled with Plinky's toolchain on the first Test; link failed on `fmaf` (fixed, not yet re-tested) |
+| Plinky IDE emulator | **compiles, links, boots and runs** (owner's Test, 2026-11-04): engine up at 32 kHz, no underruns over ~4 min. The timing readout is 0 there, so CPU load is still unknown; 17 clipped samples while editing |
 | Cortex-M33 | compiles with GCC 8.5 (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`): 51 KB code, 21 KB constants, 130 KB static SRAM (31 KB with tables in PSRAM). Not linked against Plinky's firmware (not public) |
 | On a Plinky 12 | **never run.** CPU load on core 1 is the open question; the panel measures it on its DSP page |
 | Saving, MIDI, CV | not yet (roadmap) |

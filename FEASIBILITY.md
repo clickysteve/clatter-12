@@ -136,3 +136,4 @@ sizes. See TESTING.md. None of this is hardware verification.
    GPL-compatible or an arrangement with the LXR copyright holder. Personal builds are unaffected.
    This needs an answer from Plinky before a community-library submission; it is not legal advice.
 6. **No device here.** The IDE has been used once by the owner: CLATTER 12 compiled with Plinky's toolchain and failed to link on a missing `fmaf` (fixed since, not yet re-tested). Everything else Plinky-side is untested.
+   Update 2026-11-04: the panel also links and runs in the IDE emulator (TESTING.md); only the device remains.
