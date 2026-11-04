@@ -14,7 +14,7 @@ static unsigned scenario_render(int16_t* out, unsigned frames)
 	pocket_seq_edit_commit();
 	pocket_seq_set_last_page(1);
 	pocket_seq_set_tempo(128);
-	pocket_seq_set_swing(58);
+	pocket_lxr_set_bpm(128);
 	pocket_seq_play(1);
 	unsigned i;
 	for (i = 0; i + 64 <= frames; i += 64)

@@ -214,6 +214,36 @@ static void sequencer_timing(void)
 	CHECK(fabs(ratio - 44140.0 / 32000.0) < 0.002, "ratio %.4f", ratio);
 }
 
+/* The engine may be asked for any block size up to 128 frames (Plinky's audio callback: 64; a browser's
+ * audio worklet: 128). The audio must not depend on it. (The first version ran out of converter buffer at
+ * 128 and went silent for good: nothing tested any block size but 64.) */
+static void block_size_independence(void)
+{
+	static int16_t a[OUT_RATE * 2 * 2], b[OUT_RATE * 2 * 2], c[OUT_RATE * 2 * 2];
+	const unsigned frames = OUT_RATE * 2;
+	for (int variant = 0; variant < 3; variant++)
+	{
+		c12_engine_init(OUT_RATE, 21);
+		struct pocket_pattern* p = pocket_seq_edit_begin();
+		memset(p, 0, sizeof *p);
+		for (int t = 0; t < POCKET_SEQ_TRACKS; t++)
+			for (int s = 0; s < 16; s += 2) p->cell[t][s] = POCKET_CELL(100, 0);
+		pocket_seq_edit_commit();
+		pocket_seq_set_tempo(150);
+		pocket_seq_play(1);
+		const unsigned chunk = variant == 0 ? 64 : (variant == 1 ? 128 : 96);
+		int16_t* out = variant == 0 ? a : (variant == 1 ? b : c);
+		for (unsigned i = 0; i < frames; i += chunk) c12_engine_render(&out[2 * i], chunk > frames - i ? frames - i : chunk);
+		struct c12_engine_stats st;
+		c12_engine_stats_read(&st);
+		CHECK(st.underruns == 0, "block %u: %u underruns", chunk, st.underruns);
+	}
+	int diff128 = memcmp(a, b, sizeof a), diff96 = memcmp(a, c, sizeof a);
+	printf("  block sizes 64, 96, 128 frames render identical audio: %s\n", (diff128 || diff96) ? "NO" : "yes");
+	CHECK(diff128 == 0, "128-frame blocks differ from 64-frame blocks");
+	CHECK(diff96 == 0, "96-frame blocks differ from 64-frame blocks");
+}
+
 static void all_voices_and_kits(void)
 {
 	static uint8_t kit[C12_KIT_PARAMS];
@@ -273,6 +303,7 @@ int main(void)
 	one_hit(POCKET_TRIG_CLOSED_HAT);
 	one_hit(POCKET_TRIG_OPEN_HAT);
 	sequencer_timing();
+	block_size_independence();
 	all_voices_and_kits();
 	return CHECK_REPORT("engine");
 }

@@ -1,12 +1,12 @@
 /*
- * export_patterns.c - real CLATTER patterns for the project page (docs/assets/patterns.js).
+ * export_patterns.c - reference patterns from CLATTER Pocket's native generator, for tests/test_wasm.mjs.
  * Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only
  *
- * Runs CLATTER Pocket's generator and mutator (the code the panel runs) for every style, three
- * seeds each, at 64 steps, density 50 and complexity 50 (the panel's defaults), then two successive
- * medium mutations of each. Writes a binary file of 2 bytes per cell (velocity 0-127, variation 0-5),
- * seven tracks by 64 steps per pattern, and prints the style and kit names as JSON lines for
- * tools/make_site_data.py. The page replays these: it does not generate anything itself.
+ * Runs CLATTER Pocket's generator and mutator (the code the panel runs, compiled natively) for every
+ * style, three seeds each, at 64 steps, density 50 and complexity 50, then two successive medium
+ * mutations of each. Writes 2 bytes per cell (velocity, variation), seven tracks by 64 steps per
+ * pattern, and prints the style and kit names as one JSON line. The WebAssembly build of the same
+ * generator, which the project page runs, must reproduce every byte.
  *   export_patterns OUT.bin
  */
 #include <stdio.h>

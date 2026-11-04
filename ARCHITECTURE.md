@@ -66,7 +66,7 @@ than needed, `underruns` counted). About 4 100 multiply-adds per output block (n
 | code | 51 KB (`clatter_12_sram.cpp`: 33 KB flash + 9.4 KB SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, param table) | 21 KB | flash |
 | LXR tables, unpacked | 102 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
-| other static state (voices, event ring, patterns, converter) | 28 KB | static SRAM |
+| other static state (voices, event ring, patterns, converter) | 30 KB | static SRAM |
 | panel object | 2.7 KB | Plinky's 128 KB panel arena |
 
 Nothing large is on the stack (the converter's coefficient row is static; the docs ask for < 128
@@ -89,3 +89,14 @@ compares the result with Pocket's own build of the same files.
 
 `tools/make_panel.py` adds the library metadata, the licence notice, the build configuration and
 `panel/clatter12.cpp`, and with `--compact` strips indentation from the generated part.
+
+## The web build
+
+`docs/` (GitHub Pages) runs the same engine text in the browser. `core/c12_wasm.c` is a thin export layer; it and
+the generated engine text (`build/c12_engine_c.c`) and CLATTER's libm shim build to one 89 KB module
+(`make wasm`: a wasm32 clang and `wasm-ld`). Two instances are used: one inside an AudioWorklet
+(`docs/assets/c12-worklet.js`: render 128-frame quanta, kit streamed 48 parameters a quantum as the panel's `on_ui`
+does, sequencer position reported to the page), and one on the main thread that only runs the generator for GEN and
+MUT. The page (`docs/assets/site.js`) keeps the pattern as the sequencer's own 32-bit cells and mirrors every
+edit into the engine. The audio context asks for 32 kHz, the panel's rate; a browser that refuses gets the engine
+at its own rate through the converter, which now also converts up.

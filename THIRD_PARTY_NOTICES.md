@@ -16,3 +16,10 @@ from either is used.
 
 The host tools use only the C library and Python's standard library. Pillow was used once to make
 `docs/images/*.png` from the simulator's PPM frames.
+
+## Build tools for the web module (not included)
+
+`docs/assets/c12.wasm` is built from this repository's sources (the engine text, `core/c12_wasm.c`, and CLATTER's libm
+shim from CLATTER Pocket) with LLVM's clang and `wasm-ld`. No third-party code from those tools is in the module beyond
+compiler-generated code. The module is a derived work of the LXR-02 sound engine and is GPL-3.0-only with the same
+additional terms (NOTICE.md); its complete source is this repository.

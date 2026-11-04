@@ -29,9 +29,12 @@ extern "C" {
 
 #define C12_RS_TAPS 32
 #define C12_RS_PHASES 64
-/* Input frames held: the filter span plus up to two LXR blocks rendered ahead of one output
- * block, with room to spare. */
-#define C12_RS_CAP 256
+/* Input frames held. An output block of up to 128 frames at 32 kHz needs 207 input frames (the
+ * 32-tap window plus 128 x 44140/32000), and the engine tops up in whole 64-frame LXR blocks, so up
+ * to 207 + 63 are held: 512 leaves room, and 256 (the first version) did not (128-frame blocks, as
+ * a browser's audio worklet asks for, ran out of room and stopped for good; 64-frame blocks, the
+ * panel's, never needed more than 140). */
+#define C12_RS_CAP 512
 
 struct c12_resampler {
 	uint32_t in_rate, out_rate;
@@ -42,8 +45,9 @@ struct c12_resampler {
 	float table[C12_RS_PHASES + 1][C12_RS_TAPS];
 };
 
-/* Control context. `cutoff` is the -6 dB point as a fraction of the output Nyquist frequency
- * (1.0 = the output Nyquist frequency). Returns 0, or -1 for rates it cannot convert. */
+/* Control context. `cutoff` is the -6 dB point as a fraction of the lower Nyquist frequency
+ * (1.0 = the output's when converting down, the input's when converting up). Rates within a factor
+ * of four either way; returns 0, or -1 for rates it cannot convert. */
 int c12_rs_init(struct c12_resampler* rs, uint32_t in_rate, uint32_t out_rate, float cutoff);
 
 /* Input frames that must be available (count) before c12_rs_process can produce `frames`. */

@@ -62,3 +62,22 @@ There is no command-line install: Plinky panels go through Plinky's IDE.
 
 Every build is labelled **EXPERIMENTAL** in its library metadata. Do not submit to the community
 library before the licensing question in FEASIBILITY.md §5 is answered.
+
+## The web build (project page)
+
+`docs/assets/c12.wasm` is committed, so the page needs no build. To rebuild it (and run `tests/test_wasm.mjs`):
+
+```bash
+make test-wasm
+```
+
+This needs `node`, a clang with the wasm32 target, and `wasm-ld`. On Ubuntu: `sudo apt install clang lld`. On an
+Intel Mac, where Homebrew has no `lld` bottle (it would compile LLVM from source), install Homebrew's `llvm` for the
+compiler and take the linker from the `ziglang` Python package, in a virtual environment:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install ziglang
+make test-wasm WASM_CC=/usr/local/opt/llvm/bin/clang "WASM_LD=.venv/bin/python -m ziglang wasm-ld"
+```
+
+`make site-serve` serves `docs/` at http://localhost:8000. Audio needs https or localhost, and a click.

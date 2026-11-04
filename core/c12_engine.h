@@ -57,7 +57,7 @@ void c12_tables_bind(void* mem);
 int c12_engine_init(uint32_t out_rate, uint32_t seed);
 
 /* Audio context. `frames` stereo frames, interleaved int16, at out_rate. Any frame count up to
- * 128. */
+ * 128 (tests/test_engine.c: the audio does not depend on the block size). */
 void c12_engine_render(int16_t* out_lr, unsigned frames);
 
 /* Either context: copies of the counters (single words, read without locking). */

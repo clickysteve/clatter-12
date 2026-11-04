@@ -89,6 +89,10 @@ int main(void)
 	/* other output rates (in case SAMPLE_FREQ is not 32000) */
 	CHECK(c12_rs_init(&rs, 44140, 31250, 1.0f) == 0, "31250 Hz");
 	CHECK(c12_rs_init(&rs, 44140, 44100, 1.0f) == 0, "44100 Hz");
-	CHECK(c12_rs_init(&rs, 44140, 48000, 1.0f) != 0, "upsampling is refused");
+	/* converting up (a browser that will not run an audio context at 32 kHz) */
+	const double u1k = tone_response(1000, 1000, 48000), u10k = tone_response(10000, 10000, 48000);
+	printf("  upsampling to 48 kHz: 1 kHz %.3f dB, 10 kHz %.3f dB\n", db(u1k), db(u10k));
+	CHECK(fabs(db(u1k)) < 0.05 && fabs(db(u10k)) < 0.3, "48 kHz gain %.3f / %.3f dB", db(u1k), db(u10k));
+	CHECK(c12_rs_init(&rs, 44140, 8000, 1.0f) != 0, "more than 4:1 is refused");
 	return CHECK_REPORT("resampler");
 }

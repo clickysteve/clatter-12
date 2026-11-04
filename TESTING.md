@@ -10,6 +10,8 @@
 | `equiv_c` / `equiv_cxx` | the generated engine text compiled as C and as C++, same scenario | 98 % of samples identical, max 2 LSB, 88.8 dB: C++ picks the `float` overloads of `<math.h>` functions where C promotes to `double` |
 | `test_panel_sim` | **the real panel source** in the simulator: boot, play, playhead, pressure velocity, toggle, hold, variations, pages, copy, length, GEN/MUT/UNDO/redo/CLR, kits while playing | 36/36; panel object 2 728 bytes; writes `build/sim/*.ppm`, `build/sim/session.wav` |
 | `check_api.py` | every Plinky name the glue uses (via the simulator) exists in the published API bundle | 36 names found (`SAMPLE_FREQ` only in Plinky's own example panels) |
+| `block size` (in `test_engine`) | the audio must not depend on the block size: 64 (Plinky), 96 and 128 frames (a browser's audio worklet) render bit-identical audio, with no underruns | passes. **It found a latent bug**: the converter's input buffer (256 frames) was too small for 128-frame blocks and stopped the engine for good; the panel's 64-frame blocks never hit it. Buffer now 512 (2 KB more RAM) |
+| `test_wasm.mjs` (`make test-wasm`) | the browser build `docs/assets/c12.wasm` under node, called as the page calls it: no imports; style and kit names equal the page's; **generator and mutator reproduce the native ones byte for byte (99 of 99 patterns)**; a 5 s scenario (generate, designed kit loaded mid-render, mutate) renders **100% sample-identical** to the native C build (426 dB); the sequencer position moves and returns 255 on stop; runs at 44.1 and 48 kHz | 15/15 |
 | `make m33` | GCC compile for Cortex-M33 + FPv5-SP, three variants, section sizes | compiles; see ARCHITECTURE.md "Memory" |
 | `check_link.py` (in `make m33`) | every math function the engine calls is one Plinky's panels are known to link with, or defined in the engine; M33 objects reference nothing else; **no software double-precision call on the audio path** | expf, sinf, sqrtf (+ mem*) from Plinky; fmaf in the engine; 0 soft-double calls (was ~300 before literals were made float) |
 
@@ -54,6 +56,10 @@ What the emulator log shows (owner's run, about four minutes of playing and one 
   for sound banks missing from the emulator's disk image. They are not CLATTER 12's.
 
 This log does not say how it sounded or whether touches and LEDs behaved: not yet recorded.
+
+## The browser demo
+
+The project page's sound is the same engine, so the tests above cover it, and `test_wasm.mjs` covers the build itself. In a real browser (Chromium, 2026-11-04, via the app's browser pane) the page was driven end to end: a real click starts the audio context at 32 kHz, the engine reports ready, the playhead follows the engine's sequencer through all 16 steps, GEN produced a new pattern at the current length, KIT, MUT, mute and STOP behaved, and the level meter showed peaks of 0.45 to 0.92 of full scale. Not tested: Firefox and Safari, and listening on real speakers.
 
 ## Untested
 

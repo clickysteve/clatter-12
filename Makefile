@@ -33,7 +33,7 @@ CXXFLAGS_HOST := -std=gnu++17 -O2 -ffp-contract=off -Wall -Wno-unused-function -
 M33_FLAGS := -std=gnu++17 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 \
 	-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wno-psabi
 
-.PHONY: all panel test m33 bench pocket-test site-data site-serve clean
+.PHONY: all panel test m33 bench pocket-test wasm test-wasm site-serve clean
 all: panel test
 
 $(BUILD)/c12_engine.inc $(BUILD)/c12_engine_c.c: $(GEN_DEPS)
@@ -108,17 +108,39 @@ m33: $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 	$(PY) tools/m33_sizes.py $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 	$(PY) tools/check_link.py $(BUILD)/c12_engine.inc $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 
-# The project page (docs/, GitHub Pages) uses real output of CLATTER's generator and of this engine.
-# The generated files are committed, so the page needs no build; this regenerates them (needs ffmpeg).
-$(BUILD)/export_patterns: tools/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a
-	$(CC) -std=gnu11 -O2 -w -I$(POCKET)/engine -I$(POCKET)/seq tools/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a -lm -o $@
-$(BUILD)/render_clips: tools/render_clips.c $(BUILD)/c12_unity.o
-	$(CC) -std=gnu11 -O2 -w -Icore -I$(POCKET)/engine -I$(POCKET)/seq tools/render_clips.c $(BUILD)/c12_unity.o -lm -o $@
-site-data: $(BUILD)/export_patterns $(BUILD)/render_clips
-	@mkdir -p $(BUILD)/clips
-	$(BUILD)/export_patterns $(BUILD)/patterns.bin > $(BUILD)/patterns_meta.json
-	$(BUILD)/render_clips $(BUILD)/clips > $(BUILD)/clips_meta.json
-	$(PY) tools/make_site_data.py
+# The project page (docs/, GitHub Pages) runs the engine in the browser as WebAssembly: the generated
+# engine text (what the panel contains) + core/c12_wasm.c + CLATTER's libm shim, built with a clang that
+# has the wasm32 target and a wasm-ld. The built module is committed (docs/assets/c12.wasm), so the page
+# needs no build. Ubuntu: apt install clang lld. macOS (Intel, no lld bottle): Homebrew llvm for the
+# compiler and WASM_LD="python3 -m ziglang wasm-ld" from `pip install ziglang`.
+WASM_CC ?= clang
+WASM_LD ?= wasm-ld
+WASM_CFLAGS := --target=wasm32 -std=gnu11 -O2 -ffreestanding -fno-builtin -w -Dstatic_assert=_Static_assert \
+	-Icore -I$(POCKET)/engine -I$(POCKET)/seq -I$(POCKET)/lxr/shim -I$(POCKET)/lxr/shim/libc \
+	-include stdint.h -include stddef.h -include string.h -include stdlib.h -include stdio.h -include math.h \
+	-DC12_LXR_CODE= -DC12_LXR_DATA=
+WASM_OUT := docs/assets/c12.wasm
+$(BUILD)/wasm/engine.o: $(BUILD)/c12_engine_c.c
+	@mkdir -p $(BUILD)/wasm
+	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
+$(BUILD)/wasm/glue.o: core/c12_wasm.c core/c12_engine.h
+	@mkdir -p $(BUILD)/wasm
+	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
+$(BUILD)/wasm/libm.o: $(POCKET)/lxr/bridge/libm.c
+	@mkdir -p $(BUILD)/wasm
+	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
+$(WASM_OUT): $(BUILD)/wasm/engine.o $(BUILD)/wasm/glue.o $(BUILD)/wasm/libm.o
+	$(WASM_LD) $^ -o $@ --no-entry --export-memory --gc-sections --strip-all -z stack-size=65536
+wasm: $(WASM_OUT)
+# Reference data from the native generator, and the native render of the same scenario the browser
+# build is held to (tests/scenario.inc).
+$(BUILD)/export_patterns: tests/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a
+	$(CC) -std=gnu11 -O2 -w -I$(POCKET)/engine -I$(POCKET)/seq tests/export_patterns.c $(BUILD)/pocket/seq.o $(BUILD)/pocket/liblxr_nofx.a -lm -o $@
+$(BUILD)/patterns.bin: $(BUILD)/export_patterns
+	$< $@ > $(BUILD)/patterns_meta.json
+test-wasm: $(WASM_OUT) $(BUILD)/patterns.bin $(BUILD)/equiv_c
+	$(BUILD)/equiv_c $(BUILD)/test/equiv_c.raw
+	node tests/test_wasm.mjs
 site-serve:
 	$(PY) -m http.server 8000 --directory docs
 

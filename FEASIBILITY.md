@@ -118,7 +118,7 @@ sizes. See TESTING.md. None of this is hardware verification.
 1. **Core-1 CPU.** Unmeasured; see §3. Mitigations prepared, decision needs one device run.
 2. **SRAM for the LXR's tables.** The default build needs ~130 KB of static SRAM (102 KB tables)
    outside the 128 KB panel arena; whether the firmware has it is undocumented. `clatter_12_psram.cpp`
-   needs 31 KB and puts the tables in PSRAM (cost: XIP-cache misses on oscillator reads). A third
+   needs 33 KB and puts the tables in PSRAM (cost: XIP-cache misses on oscillator reads). A third
    option, the tables inside the panel arena (the object is 2.7 KB), needs a custom staged-load
    commit and is on the roadmap.
 3. **Source size.** The generated panel is ~306 KB. Another panel author reports the flash endpoint

@@ -5,6 +5,7 @@
 #include "c12_engine.h"
 #include "pocket_seq.h"
 #include "pocket_gen.h"
+#include "pocket_lxr.h"
 #include "scenario.inc"
 
 static int16_t pcm[32000 * 5 * 2];

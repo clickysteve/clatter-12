@@ -26,14 +26,16 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 | LXR engine | all six voices / seven triggers, Pocket's kits, variations, generator; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
 | Sound, host | matches CLATTER Pocket's reference build: every voice's spectrum within 0.03 dB per third-octave band, envelopes within 0.1 dB (95 % of 10 ms frames); 32 kHz output matches an ideal conversion of the native-rate LXR at 50-79 dB SNR |
 | Panel, simulated | 16-step grid for seven tracks with pressure velocity, variation lanes, four pages with copy, length 16-64, GEN / MUT / KIT / STYLE / UNDO / CLR, play/stop with Plinky's transport and tempo: 36 scripted checks pass |
+| Browser demo | **plays**: the engine, sequencer and generator as WebAssembly, in an AudioWorklet at 32 kHz. Audio matches the native build sample for sample; the generator matches it byte for byte (99 patterns). [Page](https://clickysteve.github.io/clatter-12/) |
 | Plinky IDE emulator | **compiles, links, boots and runs** (owner's Test, 2026-11-04): engine up at 32 kHz, no underruns over ~4 min. The timing readout is 0 there, so CPU load is still unknown; 17 clipped samples while editing |
-| Cortex-M33 | compiles with GCC 8.5 (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`): 51 KB code, 21 KB constants, 130 KB static SRAM (31 KB with tables in PSRAM). Not linked against Plinky's firmware (not public) |
+| Cortex-M33 | compiles with GCC 8.5 (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`): 51 KB code, 21 KB constants, 132 KB static SRAM (33 KB with tables in PSRAM). Not linked against Plinky's firmware (not public) |
 | On a Plinky 12 | **never run.** CPU load on core 1 is the open question; the panel measures it on its DSP page |
 | Saving, MIDI, CV | not yet (roadmap) |
 
-**Project page:** `docs/index.html` is a self-contained page in CLATTER Pocket's style with a working model
-of the grid and four audio clips rendered by this engine. Open it locally with `make site-serve`, or from
-GitHub Pages (Settings, Pages, deploy from `main`, folder `/docs`).
+**Project page:** https://clickysteve.github.io/clatter-12/ (source in `docs/`). A working model of the grid in
+CLATTER Pocket's style that **plays**: the page runs the panel's engine, sequencer and CLATTER's generator as
+WebAssembly in your browser (`docs/assets/c12.wasm`, built by `make wasm`, checked by `make test-wasm`). It is
+not a Plinky: no Plinky output stage, pressure or CPU limit. Run it locally with `make site-serve`.
 
 ## Playing it (as designed; simulated)
 

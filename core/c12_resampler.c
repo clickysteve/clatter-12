@@ -28,12 +28,13 @@ static float bessel_i0(float x)
 
 int c12_rs_init(struct c12_resampler* rs, uint32_t in_rate, uint32_t out_rate, float cutoff)
 {
-	if (in_rate == 0 || out_rate == 0 || in_rate > 4u * out_rate || out_rate > in_rate) return -1;
+	if (in_rate == 0 || out_rate == 0 || in_rate > 4u * out_rate || out_rate > 4u * in_rate) return -1;
 	memset(rs, 0, sizeof *rs);
 	rs->in_rate = in_rate;
 	rs->out_rate = out_rate;
-	/* cutoff in cycles per input sample */
-	const float fc = 0.5f * cutoff * (float)out_rate / (float)in_rate;
+	/* cutoff in cycles per input sample: the output's Nyquist frequency when converting down (the
+	 * panel's case), the input's when converting up (a browser that will not give 32 kHz) */
+	const float fc = 0.5f * cutoff * (out_rate < in_rate ? (float)out_rate / (float)in_rate : 1.f);
 	const float i0beta = bessel_i0(C12_RS_BETA);
 	for (int p = 0; p <= C12_RS_PHASES; p++)
 	{
