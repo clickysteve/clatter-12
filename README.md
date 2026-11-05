@@ -16,19 +16,19 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 > either. It contains a modified version of the LXR-02 firmware's sound engine. "Erica Synths",
 > "LXR" and "LXR-02" are trademarks of Erica Synths.
 
-![CLATTER 12's pages in its simulator: SEQ (with a step selected), SOUND, GEN, MIX, FX](docs/images/grid_sheet.png)
+![CLATTER 12's pages in its simulator: SEQ (with a step selected), SOUND, GEN, MIX, FX (SPACE and COLOUR banks), PERFORM, REPEAT, and the tempo overlay](docs/images/grid_sheet.png)
 
 ## Status
 
 | | |
 |---|---|
 | Feasibility | **Positive**: Plinky panels are native code with a core-1 audio callback. [FEASIBILITY.md](FEASIBILITY.md) |
-| LXR engine | all six voices / seven triggers, unchanged; the LXR firmware's own drive, ring modulator and compressor; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
+| LXR engine | all six voices / seven triggers, unchanged; the LXR firmware's own drive, ring modulator and compressor; CLATTER 12's own delay and reverb; compiles into one `#include`-free C++ file (`tools/amalgamate.py`) |
 | Sound, host | matches CLATTER Pocket's reference build: every voice's spectrum within 0.03 dB per third-octave band; CLATTER 12's own mix is Pocket's to the bit when the mixer is neutral |
-| Panel, simulated | five pages (SEQ, SOUND, GEN, MIX, FX) and Plinky's save page: 127 scripted checks pass in CLATTER 12's simulator of the Plinky API |
+| Panel, simulated | seven pages (SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT), Plinky's save page, and a tempo pad on every page: 201 scripted checks pass in CLATTER 12's simulator of the Plinky API; 66 more time ratchets, rolls, repeats and the effects to the engine's block |
 | Browser demo | **runs the panel itself**: the firmware source compiled to WebAssembly with the simulator, so the page's grid is the panel's interface. [Page](https://clickysteve.github.io/clatter-12/) |
-| Cortex-M33 | compiles with GCC (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`), engine and panel: 89 KB code, 27 KB constants, 38 KB static SRAM + 100 KB LXR tables (SRAM or PSRAM); panel object 38 KB of the 128 KB arena. Not linked against Plinky's firmware (not public) |
-| CPU, estimated | QEMU's Cortex-M33 model: **168 000 instructions per 2 ms block on average, 244 000 in the busiest** (two LXR blocks); FX add up to 72 000. At 150 MHz that is at least 56 % / 81 % of core 1 before wait states. **Not a measurement of a Plinky** (TESTING.md) |
+| Cortex-M33 | compiles with GCC (`-mcpu=cortex-m33 -mfpu=fpv5-sp-d16`), engine and panel: 117 KB code, 27 KB constants, 41 KB static SRAM + 100 KB LXR tables (SRAM or PSRAM) + 282 KB of delay and reverb lines (PSRAM); panel object 45 KB of the 128 KB arena. Not linked against Plinky's firmware (not public) |
+| CPU, estimated | QEMU's Cortex-M33 model: **169 000 instructions per 2 ms block on average, 245 000 in the busiest** (two LXR blocks); the delay and reverb add 21 700 when used (0 when idle), the LXR FX up to 50 000. At 150 MHz the default is at least 56 % / 82 % of core 1 before wait states; with the delay and reverb the busiest blocks pass the budget. **Not a measurement of a Plinky** (TESTING.md) |
 | Plinky IDE emulator | the first version **compiled, linked and ran** (2026-11-04); this version not yet tried there |
 | On a Plinky 12 | **never run** |
 | MIDI, CV | not yet (roadmap) |
@@ -36,21 +36,24 @@ renamed: the sound is the Erica Synths LXR-02 firmware's sound engine, run uncha
 **Project page:** https://clickysteve.github.io/clatter-12/ (source in `docs/`). The page runs CLATTER 12's panel
 source (engine and Plinky glue, exactly the file pasted into Plinky's IDE) with CLATTER 12's simulator of the Plinky API,
 compiled to WebAssembly (`docs/assets/c12panel.wasm`, `make wasm`, checked by `make test-wasm`). It is an interface
-demonstration, not a Plinky: no pressure sensor, no Plinky delay or reverb, no CPU limit. `make site-serve` runs it locally.
+demonstration, not a Plinky: no pressure sensor, no Plinky delay or reverb (CLATTER 12's own run), no CPU limit. `make site-serve` runs it locally.
 
 ## Playing it (as designed; simulated)
 
-Six pages, Plinky's own (the right side buttons scroll them); row 15's first six pads jump to one. Row 15 is the same
-on every page: `SEQ SND GEN MIX FX SAV | page's own | UNDO REDO STOP PLAY`.
+Eight pages, Plinky's own (the right side buttons scroll them); row 15's first eight pads jump to one. Row 15 is the
+same on every page: `SEQ SND GEN MIX FX PRF RPT SAV | TEMPO | page's own | UNDO REDO STOP PLAY`.
 
 | Page | |
 |---|---|
-| SEQ | rows 0-6: the seven LXR triggers' steps. **Tap** an empty step: on, as loud as you press. **Tap** a lit step: off. **Hold** a lit step: it stays, and rows 8-11 edit it: variation, condition (ALWAYS, 1:2 … 4:4, 25/50/75 %), ratchet (1-8 strokes), roll spacing and velocity run, exact velocity. Row 12 mute and solo, 13 lock and audition, 14 view page (hold + tap: copy), length, swing; 15 GEN, MUT, STYLE, CLR (hold) |
+| TEMPO | row 15, every page. **Tap** it in time: tap tempo. **Hold** it: the BPM in digits, -10 -5 -1 / +1 +5 +10, half and double time, 16 presets, a held nudge, a tap row. It is Plinky's own tempo |
+| SEQ | rows 0-6: the seven LXR triggers' steps. **Tap** an empty step: on, as loud as you press. **Tap** a lit step: off. **Hold** a lit step: it stays, and rows 8-11 edit it: variation, condition (ALWAYS, 1:2 … 4:4, 25/50/75 %), ratchet (1-8 strokes, never closer than 12 ms), roll (flam, drag, double, triple, accelerating, decelerating), velocity curve (flat, fade in/out, accent first/last, alternating, human), exact velocity. Row 12 mute and solo, 13 lock and audition, 14 view page (hold + tap: copy), length, swing; 15 GEN, MUT, CLR (hold) |
 | SOUND | one voice's LXR parameters, a row each, value across the row, `-`/`+` at the end; banks SOURCE, SHAPE, MOD; audition, new sound, mutate sound, lock sound |
 | GEN | style, density, complexity, mutation strength, track locks, one-track generate; kit character, wildness, mutation amount, sound locks, new sound / mutate sound per voice, NEW KIT, MUTATE KIT |
-| MIX | strips for the seven tracks and the master: mute, solo, an 8-row fader with fine `-`/`+`, pan, delay and reverb sends into Plinky's effects, meters; the master's limiter |
-| FX | routing per track; the LXR's drive (TUBE, FOLD, RAT), ring modulator and compressor; bit reduction; the LXR's sample-rate reduction |
-| SAVE | Plinky's save/load page: the whole project in a song slot |
+| MIX | strips for the seven tracks and the master: mute, solo, an 8-row fader with fine `-`/`+`, pan, delay and reverb sends, meters; the master's limiter |
+| FX | **SPACE**: CLATTER 12's delay (12 tempo divisions, feedback, low/high-pass filter, wet, ping-pong) and reverb (size, decay, damping, wet), freezes, and where the sends go (CLATTER 12's effects or Plinky's). **COLOUR**: routing; the LXR's drive, ring modulator and compressor; bit and sample-rate reduction |
+| PERFORM | all momentary (LATCH holds): mute, solo, kill groups, fills, a temporary mutation, density, stutter, delay and reverb throws, freezes; COMMIT (hold) writes it in, undoably; eight scenes recalled at the next bar |
+| REPEAT | hold a track to repeat it (1/4 to 1/64, triplets, dotted; pressure as velocity, rate or chance; curves); roll pads; beat repeat of the sequence (1 bar to 1/32T) with shape and tracks |
+| SAVE | Plinky's save/load page: the whole project in a song slot (version 2; version-1 projects convert) |
 | side buttons | Plinky's: tempo (left), pages (right; up from SEQ = CLATTER 12's DSP load page) |
 
 Interface design and rationale: [docs/DESIGN.md](docs/DESIGN.md).

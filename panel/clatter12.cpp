@@ -9,16 +9,18 @@
 //   on_dsp     core 1: c12_engine_render (the LXR at 44 140 Hz, CLATTER 12's mix and FX, converted
 //              to SAMPLE_FREQ), handed to Plinky's standard mix with the delay and reverb sends.
 //
-// Pages (Plinky's own: the right side buttons scroll them, and row 15's first six pads jump):
-//   0 SEQ    steps of the seven LXR triggers, the selected step's editor, mute/solo/lock, length
-//   1 SOUND  one voice's LXR parameters, a row each, in three banks
-//   2 GEN    pattern generator, kit generator, locks, mutation
-//   3 MIX    channel strips: level, pan, mute, solo, delay and reverb sends, master
-//   4 FX     the FX chain (LXR drive, ring modulator, compressor), bit and rate reduction, limiter
-//   5 SAVE   Plinky's own save/load page (on_serialise)
-//   above 0  panel settings: the audio core's load
-// Every page ends in the same row 15: pages | page's own | UNDO REDO STOP PLAY. docs/DESIGN.md
-// has the full map.
+// Pages (Plinky's own: the right side buttons scroll them, and row 15's first eight pads jump):
+//   0 SEQ     steps of the seven LXR triggers, the selected step's editor, mute/solo/lock, length
+//   1 SOUND   one voice's LXR parameters, a row each, in three banks
+//   2 GEN     pattern generator, kit generator, locks, mutation
+//   3 MIX     channel strips: level, pan, mute, solo, delay and reverb sends, master
+//   4 FX      SPACE (CLATTER 12's delay and reverb) and COLOUR (LXR drive, ring, compressor; bits, rate)
+//   5 PERFORM momentary mutes, solos, kills, fills, mutation, density, stutter, FX throws, scenes
+//   6 REPEAT  note repeat by track (pressure), rolls by hand, beat repeat
+//   7 SAVE    Plinky's own save/load page (on_serialise)
+//   above 0   panel settings: the audio core's load
+// Every page ends in the same row 15: pages | TEMPO | page's own | UNDO REDO STOP PLAY.
+// TEMPO: tap it to tap the tempo, hold it for the tempo overlay. docs/DESIGN.md has the full map.
 
 #define PANEL_PAD_COLOR RED
 
@@ -37,7 +39,12 @@ static const uint32_t MERGE_US = 2000000; // edits this close together are one u
 static const uint32_t REPEAT_US = 350000; // a held - or + repeats after this
 static const int UNDO_DEPTH = 16;
 
-enum { PAGE_SEQ, PAGE_SOUND, PAGE_GEN, PAGE_MIX, PAGE_FX, PAGE_SAVE, PAGES };
+enum { PAGE_SEQ, PAGE_SOUND, PAGE_GEN, PAGE_MIX, PAGE_FX, PAGE_PERF, PAGE_REPEAT, PAGE_SAVE, PAGES };
+static const int TEMPO_X = 8;               // row 15: TEMPO (tap: tap tempo; hold: the tempo overlay)
+static const uint32_t TAP_RESET_US = 2000000; // a tap this long after the last starts a new count
+static const uint32_t COMMIT_US = 500000;   // COMMIT must be held this long
+static const uint32_t SCENE_STORE_US = 1000000; // a scene pad held this long stores
+static const int SCENES = 8;
 enum { UNDO_OTHER, UNDO_STEPS, UNDO_SOUND, UNDO_MIX };
 
 static const uint32_t track_col[TRACKS] = {
@@ -56,8 +63,14 @@ static const uint32_t page_col[PAGES] = {
     LED_RGB(14, 31, 0),  // GEN
     LED_RGB(0, 20, 31),  // MIX
     LED_RGB(31, 0, 18),  // FX
+    LED_RGB(31, 24, 0),  // PERFORM
+    LED_RGB(24, 0, 31),  // REPEAT
     LED_RGB(20, 20, 6),  // SAVE
 };
+// the colour language of the performance pages (docs/DESIGN.md "Colour")
+static const uint32_t COL_KILL = LED_RGB(31, 0, 0), COL_THROW_D = LED_RGB(31, 18, 0), COL_THROW_R = LED_RGB(20, 0, 31);
+static const uint32_t COL_FREEZE = LED_RGB(8, 24, 31), COL_FILL = LED_RGB(8, 31, 0), COL_MUTATE = LED_RGB(0, 26, 18);
+static const uint32_t COL_STUTTER = LED_RGB(31, 0, 24), COL_SCENE = LED_RGB(31, 26, 8), COL_LATCH = LED_RGB(0, 12, 31);
 // the SOUND page's rows, by parameter group (c12_params.h)
 static const uint32_t group_col[12] = {
     LED_RGB(31, 14, 0), LED_RGB(20, 20, 20), LED_RGB(31, 24, 0), LED_RGB(24, 31, 0), LED_RGB(31, 6, 10), LED_RGB(31, 0, 0),
@@ -108,8 +121,34 @@ static inline int pressure_to_velocity(int pressure) {
 
 // ---- the project as saved: versioned, checked, and nothing else's ----
 static const uint32_t PROJECT_MAGIC = 0x50323143u; // "C12P"
-static const uint16_t PROJECT_VERSION = 1;
+static const uint16_t PROJECT_VERSION = 2;
+// a performance snapshot: what a scene recalls (the mixer and the FX; not the pattern or the kit)
+struct scene_t {
+  uint8_t used, mute, solo, route, master, pad0;
+  uint8_t level[7], delay[7], reverb[7];
+  uint8_t fx[32];
+};
 struct project_t {
+  uint32_t magic;
+  uint16_t version, bytes;
+  uint32_t cell[7][64]; // version 2 step layout (c12_engine.h)
+  uint8_t last_page, swing;
+  uint16_t bpm;
+  uint8_t kit[248];
+  uint8_t level[7], delay[7], reverb[7];
+  uint8_t mute, solo, route, master, pad0;
+  uint8_t fx[32];
+  uint8_t style, density, complexity, mut_strength, track_locks, sound_locks, kit_character, wildness;
+  uint8_t kit_amount, pad1, pad2, pad3;
+  uint32_t gen_seed, kit_seed;
+  // version 2: the REPEAT page's settings and the scenes
+  uint8_t rep_div, rep_mode, rep_curve, br_shape, br_mask, scene_quant, roll_target, pad4;
+  scene_t scenes[SCENES];
+  uint8_t reserved[16];
+  uint32_t crc;
+};
+// version 1 (CLATTER 12 0.0.2): read, converted, never written
+struct project_v1_t {
   uint32_t magic;
   uint16_t version, bytes;
   uint32_t cell[7][64];
@@ -125,6 +164,38 @@ struct project_t {
   uint8_t reserved[16];
   uint32_t crc;
 };
+static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay and reverb lines, after the tables' room
+// REPEAT page: rates (row 4) and beat-repeat lengths (row 9), as c12 divisions
+static const uint8_t rep_rates[16] = {c12::c12x_div_4, c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_64, 0,
+                                      c12::c12x_div_4t, c12::c12x_div_8t, c12::c12x_div_16t, c12::c12x_div_32t, 0,
+                                      c12::c12x_div_8d, c12::c12x_div_16d, 0, 0, 0};
+static const uint8_t br_lengths[8] = {c12::c12x_div_bar, c12::c12x_div_2, c12::c12x_div_4, c12::c12x_div_8,
+                                      c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_16t, c12::c12x_div_32t};
+static const uint8_t stutter_lengths[4] = {c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_32t};
+// a faster rate for the same feel (REPEAT's pressure RATE mode)
+static inline uint8_t faster_div(uint8_t d) {
+  using namespace c12;
+  switch (d) {
+  case c12x_div_bar: return c12x_div_2;
+  case c12x_div_2: return c12x_div_4;
+  case c12x_div_4: return c12x_div_8;
+  case c12x_div_8: return c12x_div_16;
+  case c12x_div_16: return c12x_div_32;
+  case c12x_div_32: return c12x_div_64;
+  case c12x_div_4t: return c12x_div_8t;
+  case c12x_div_8t: return c12x_div_16t;
+  case c12x_div_16t: return c12x_div_32t;
+  case c12x_div_8d: return c12x_div_16d;
+  case c12x_div_16d: return c12x_div_32;
+  default: return d;
+  }
+}
+// 3 x 5 digits for the tempo overlay, a row of 3 bits each, top first
+static const uint8_t digit_rows[10][5] = {
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 3, 1, 7}, {5, 5, 7, 1, 1},
+    {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 2, 2}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
+};
+static const uint8_t tempo_presets[16] = {70, 80, 90, 100, 110, 115, 120, 124, 128, 132, 136, 140, 150, 160, 170, 174};
 
 // one state undo and redo can return to: steps, length and the kit
 struct snapshot_t {
@@ -174,9 +245,45 @@ struct clatter12 : panel_t {
   c12glue::snapshot_t scratch;
   uint8_t hist_at, hist_undo, hist_redo, last_undo_kind;
   uint32_t last_undo_us;
-  // what was loaded or is about to be saved
+  // what was loaded or is about to be saved (and a version-1 file, before it is converted)
   c12glue::project_t proj;
+  c12glue::project_v1_t proj_v1;
   panel_page_t save_page;
+
+  // ---- TEMPO (row 15, every page) ----
+  uint32_t tempo_t0, tap_times[4], tap_last;
+  uint8_t tap_count, tempo_overlay, tempo_tapped;
+  int nudge_base; // the tempo a held nudge returns to, or 0
+  // ---- performance (PERFORM and REPEAT): held by a finger, or latched; none of it is saved ----
+  struct perf_t {
+    uint8_t mute, solo, kill, throw_d, throw_r, fill, freeze_d, freeze_r; // masks (freeze: 0/1)
+    int8_t density;  // -100..100
+    int8_t mutate;   // strength + 1, 0 none
+    uint8_t stutter; // a c12 division, 0 none
+    uint8_t repeat;  // beat-repeat division (REPEAT page), 0 none
+  };
+  perf_t held, latched;
+  bool latch;
+  uint32_t commit_t0;
+  bool commit_done;
+  uint8_t alt_live;    // which alt buffer the engine reads
+  int8_t alt_strength; // the mutation in alt[alt_live] (strength + 1), 0 none
+  uint16_t alt_takes;
+  c12::pocket_pattern alt[2];
+  uint8_t eff_mute, eff_solo; // what the engine was last given
+  // REPEAT page settings (saved) and state
+  uint8_t rep_div, rep_mode, rep_curve, br_shape, br_mask, roll_target;
+  uint8_t rep_latched;            // tracks repeating by LATCH
+  uint8_t rep_lvel[c12glue::TRACKS]; // their velocity, from the press that latched them
+  uint8_t rep_level[c12glue::TRACKS]; // RATE mode: 0 the chosen rate, 1 twice, 2 four times
+  uint8_t rep_shown_vel;
+  // scenes
+  c12glue::scene_t scenes[c12glue::SCENES];
+  uint8_t scene_quant, scene_active;
+  int8_t scene_pending;
+  uint32_t scene_t0[c12glue::SCENES];
+  bool scene_stored[c12glue::SCENES];
+  uint8_t fx_bank; // FX page: 0 SPACE, 1 COLOUR
 
   clatter12() {
     memset(press, 0, sizeof(press));
@@ -220,7 +327,40 @@ struct clatter12 : panel_t {
     last_undo_kind = c12glue::UNDO_OTHER;
     last_undo_us = 0;
     memset(&proj, 0, sizeof(proj));
+    memset(&proj_v1, 0, sizeof(proj_v1));
+    tempo_t0 = tap_last = 0;
+    memset(tap_times, 0, sizeof(tap_times));
+    tap_count = tempo_overlay = tempo_tapped = 0;
+    nudge_base = 0;
+    memset(&held, 0, sizeof(held));
+    memset(&latched, 0, sizeof(latched));
+    latch = false;
+    commit_t0 = 0;
+    commit_done = false;
+    alt_live = 0;
+    alt_strength = 0;
+    alt_takes = 0;
+    memset(alt, 0, sizeof(alt));
+    eff_mute = eff_solo = 0;
+    rep_div = c12::c12x_div_16;
+    rep_mode = 0;
+    rep_curve = c12::c12x_curve_flat;
+    br_shape = 0;
+    br_mask = 0x7f;
+    roll_target = 3;
+    rep_latched = 0;
+    memset(rep_lvel, 0, sizeof(rep_lvel));
+    memset(rep_level, 0, sizeof(rep_level));
+    rep_shown_vel = 0;
+    memset(scenes, 0, sizeof(scenes));
+    scene_quant = 1;
+    scene_active = 0xff;
+    scene_pending = -1;
+    memset(scene_t0, 0, sizeof(scene_t0));
+    memset(scene_stored, 0, sizeof(scene_stored));
+    fx_bank = 0;
     memset(meter, 0, sizeof(meter));
+    memset(space_meter, 0, sizeof(space_meter));
     memset(&prof_acc, 0, sizeof(prof_acc));
     oy = 0;
   }
@@ -259,6 +399,11 @@ struct clatter12 : panel_t {
       return;
     }
     c12::c12_engine_set_clock(clock_us);
+    // CLATTER 12's delay and reverb lines (156 KB): PSRAM, after the room the tables may take
+    if (get_psram_size() >= (uint32_t)(C12_PSRAM_SPACE_OFFSET + c12::c12x_space_bytes))
+      c12::c12_space_bind((uint8_t *)get_psram_ptr() + C12_PSRAM_SPACE_OFFSET);
+    else
+      printf("clatter12: no PSRAM for the delay and reverb; they are silent\n");
     c12::c12_kit_design(kit, -1, 0, 50); // the LXR-02 firmware's init kit
     c12::c12_kit_set_target(kit, c12::c12x_kit_params);
     __atomic_store_n(&g_ready, 1u, __ATOMIC_RELEASE);
@@ -324,10 +469,20 @@ struct clatter12 : panel_t {
       c12::c12_mix_set_level(t, level[t]);
       c12::c12_mix_set_send(t, dsend[t], rsend[t]);
     }
-    c12::c12_mix_set_mute(mute);
-    c12::c12_mix_set_solo(solo);
+    push_mutes(true);
     c12::c12_mix_set_route(route);
     c12::c12_mix_set_master(master);
+  }
+  // the mutes and solos the engine hears: the mixer's, and the performance's on top
+  uint8_t perf_mute() const { return (uint8_t)((held.mute | latched.mute | held.kill | latched.kill) & 0x7f); }
+  uint8_t perf_solo() const { return (uint8_t)((held.solo | latched.solo) & 0x7f); }
+  void push_mutes(bool force) {
+    const uint8_t m = (uint8_t)(mute | perf_mute()), so = perf_solo() ? perf_solo() : solo;
+    if (!force && m == eff_mute && so == eff_solo) return;
+    eff_mute = m;
+    eff_solo = so;
+    c12::c12_mix_set_mute(m);
+    c12::c12_mix_set_solo(so);
   }
 
   // ---- undo / redo: a ring of snapshots of the steps, the length and the kit ----
@@ -560,8 +715,9 @@ struct clatter12 : panel_t {
           for_edited_steps([&](int t, int s) {
             keep_vel(t, s);
             uint32_t c = cell_at(t, s);
-            set_cell(t, s, c12::c12x_cell_with_ext(c, (unsigned)(x - 8), c12::c12x_cell_roll(c), c12::c12x_cell_ramp(c)), now);
+            set_cell(t, s, c12::c12x_cell_with_ext(c, (unsigned)(x - 8), c12::c12x_cell_curve(c), c12::c12x_cell_roll(c)), now);
           });
+          audition_selected();
         }
       }
       // y9: condition x0-12
@@ -571,20 +727,23 @@ struct clatter12 : panel_t {
           set_cell(t, s, c12::c12x_cell_with_condition(cell_at(t, s), (unsigned)x), now);
         });
       }
-      // y10: roll spacing x0-3 | velocity ramp x5-8
+      // y10: roll x0-6 (none flam drag double triple accel decel) | stroke velocity curve x8-14
       if (pressed(x, 10)) {
-        if (x <= 3)
+        if (x < c12::c12x_rolls) {
           for_edited_steps([&](int t, int s) {
             keep_vel(t, s);
             uint32_t c = cell_at(t, s);
-            set_cell(t, s, c12::c12x_cell_with_ext(c, c12::c12x_cell_ratchet(c), (unsigned)x, c12::c12x_cell_ramp(c)), now);
+            set_cell(t, s, c12::c12x_cell_with_ext(c, c12::c12x_cell_ratchet(c), c12::c12x_cell_curve(c), (unsigned)x), now);
           });
-        else if (x >= 5 && x <= 8)
+          audition_selected();
+        } else if (x >= 8 && x - 8 < c12::c12x_curves) {
           for_edited_steps([&](int t, int s) {
             keep_vel(t, s);
             uint32_t c = cell_at(t, s);
-            set_cell(t, s, c12::c12x_cell_with_ext(c, c12::c12x_cell_ratchet(c), c12::c12x_cell_roll(c), (unsigned)(x - 5)), now);
+            set_cell(t, s, c12::c12x_cell_with_ext(c, c12::c12x_cell_ratchet(c), (unsigned)(x - 8), c12::c12x_cell_roll(c)), now);
           });
+          audition_selected();
+        }
       }
       // y11: velocity, 16 levels
       if (pressed(x, 11)) {
@@ -593,6 +752,13 @@ struct clatter12 : panel_t {
         if (stopped()) audition(sel_track, v, (int)c12::c12x_cell_variation(cell_at(sel_track, sel_step)));
       }
     }
+  }
+
+  // stopped: hear the selected step as it now plays, ratchet, roll and curve included
+  void audition_selected() {
+    if (!stopped() || sel_track < 0) return;
+    const uint32_t c = cell_at(sel_track, sel_step);
+    if (c12::c12x_cell_velocity(c)) c12::c12_perf_play(sel_track, c);
   }
 
   void seq_tracks(uint32_t now) {
@@ -629,20 +795,19 @@ struct clatter12 : panel_t {
       }
     for (int x = 8; x < 16; ++x)
       if (pressed(x, 14)) c12::pocket_seq_set_swing(swing_levels[x - 8]);
-    // y15 x6-9: GEN, MUT, STYLE, CLR (hold)
-    if (pressed(6, 15)) generate(now);
-    if (pressed(7, 15)) mutate(now);
-    if (pressed(8, 15)) style = (uint8_t)((style + 1) % c12::c12x_gen_styles);
-    if (pressed(9, 15)) {
+    // y15 x9-11: GEN, MUT, CLR (hold)
+    if (pressed(9, 15)) generate(now);
+    if (pressed(10, 15)) mutate(now);
+    if (pressed(11, 15)) {
       clr_t0 = now;
       clr_done = false;
     }
-    if (down(9, 15) && !clr_done && clr_t0 && now - clr_t0 >= CLEAR_US) {
+    if (down(11, 15) && !clr_done && clr_t0 && now - clr_t0 >= CLEAR_US) {
       clear_all(now);
       clr_done = true;
-      show_ripple(9, 15 + oy, RED);
+      show_ripple(11, 15 + oy, RED);
     }
-    if (!down(9, 15)) clr_t0 = 0;
+    if (!down(11, 15)) clr_t0 = 0;
   }
 
   void draw_seq(uint32_t now) {
@@ -663,7 +828,7 @@ struct clatter12 : panel_t {
         if (v) {
           col = fade_col(track_col[t], (int)vel_brightness_q8(v));
           // a step with a variation, condition or ratchet is tinted towards white: it does more
-          if (c12::c12x_cell_variation(cell) || c12::c12x_cell_condition(cell) || c12::c12x_cell_ratchet(cell))
+          if (c12::c12x_cell_variation(cell) || c12::c12x_cell_condition(cell) || c12::c12x_cell_ratchet(cell) || c12::c12x_cell_roll(cell))
             col = lerp_col(col, LED_RGB(24, 24, 24), 70);
           if (!page_in_len) col = DIMMEST(col);
           if (t == sel_track && step == sel_step) col = add_col(col, LED_RGB(10, 10, 10));
@@ -696,8 +861,8 @@ struct clatter12 : panel_t {
         uint32_t base = x == 0 ? LED_RGB(6, 6, 6) : x < 10 ? LED_RGB(0, 18, 31) : LED_RGB(24, 0, 31);
         c9 = has_sel && (int)c12::c12x_cell_condition(sc) == x ? add_col(base, LED_RGB(6, 6, 6)) : DIMMEST(base);
       }
-      if (x <= 3) c10 = has_sel && (int)c12::c12x_cell_roll(sc) == x ? LED_RGB(31, 31, 0) : LED_RGB(4, 4, 0);
-      if (x >= 5 && x <= 8) c10 = has_sel && (int)c12::c12x_cell_ramp(sc) == x - 5 ? LED_RGB(0, 31, 12) : LED_RGB(0, 4, 2);
+      if (x < c12::c12x_rolls) c10 = has_sel && (int)c12::c12x_cell_roll(sc) == x ? (x ? LED_RGB(31, 31, 0) : LED_RGB(10, 10, 10)) : (x ? LED_RGB(4, 4, 0) : LED_RGB(2, 2, 2));
+      if (x >= 8 && x - 8 < c12::c12x_curves) c10 = has_sel && (int)c12::c12x_cell_curve(sc) == x - 8 ? LED_RGB(0, 31, 12) : LED_RGB(0, 4, 2);
       const int vel_cells = has_sel ? ((int)c12::c12x_cell_velocity(sc) - 8) * 15 / 119 : -1;
       c11 = x <= vel_cells ? fade_col(tc, 120 + x * 8) : faint(tc);
       if (!has_sel) { c8 = DIMMEST(c8); c9 = DIMMEST(c9); c10 = DIMMEST(c10); c11 = 0; }
@@ -724,13 +889,12 @@ struct clatter12 : panel_t {
     for (int x = 4; x < 8; ++x) led(x, 14, (x - 4) < len_pages ? LED_RGB(24, 12, 0) : LED_RGB(3, 1, 0));
     const int sw = c12::pocket_seq_swing();
     for (int x = 8; x < 16; ++x) led(x, 14, swing_levels[x - 8] <= sw ? LED_RGB(0, 14, 31) : LED_RGB(0, 2, 4));
-    // y15 page's own: GEN MUT STYLE CLR
-    led(6, 15, LED_RGB(14, 31, 0));
-    led(7, 15, LED_RGB(0, 24, 18));
-    led(8, 15, palette_hue_to_col((uint8_t)(style * 3), 6));
+    // y15 page's own: GEN MUT CLR
+    led(9, 15, LED_RGB(14, 31, 0));
+    led(10, 15, LED_RGB(0, 24, 18));
     uint32_t clr = LED_RGB(8, 0, 0);
     if (clr_t0 && !clr_done) clr = lerp_col(clr, LED_RGB(31, 0, 0), clampi((int)((now - clr_t0) * 256 / CLEAR_US), 0, 256));
-    led(9, 15, clr);
+    led(11, 15, clr);
   }
 
   // ================================================================== bars (SOUND, FX)
@@ -961,45 +1125,627 @@ struct clatter12 : panel_t {
   }
 
   // ================================================================== FX page
-  struct fx_row_t { uint8_t fx; uint8_t menu; uint8_t y; uint32_t col; };
+  // Two banks, chosen on row 0 (x8 SPACE, x9 COLOUR), as the SOUND page's banks are:
+  //   SPACE   CLATTER 12's delay and reverb, fed by the MIX page's sends
+  //   COLOUR  the LXR firmware's drive, ring modulator and compressor; bits; the LXR's rate
+  // Row 0 on both: x11 where the sends go (CLATTER 12's effects or Plinky's), x12 DELAY FREEZE,
+  // x13 REVERB FREEZE (momentary), x15 LIMITER. COLOUR's x0-6 route tracks into its chain; SPACE's
+  // show each track's sends.
+  struct fx_row_t { uint8_t fx; uint8_t menu; uint8_t bipolar; uint8_t y; uint32_t col; };
+  const fx_row_t *fx_rows(int bank, int &n) {
+    static const fx_row_t colour[] = {
+        {(uint8_t)c12::c12x_fx_drive_wet, 0, 0, 1, LED_RGB(31, 8, 0)},    {(uint8_t)c12::c12x_fx_drive_type, 1, 0, 2, LED_RGB(31, 8, 0)},
+        {(uint8_t)c12::c12x_fx_drive_amount, 0, 0, 3, LED_RGB(31, 8, 0)}, {(uint8_t)c12::c12x_fx_drive_tone, 0, 0, 4, LED_RGB(31, 8, 0)},
+        {(uint8_t)c12::c12x_fx_drive_level, 0, 0, 5, LED_RGB(31, 8, 0)},  {(uint8_t)c12::c12x_fx_ring_wet, 0, 0, 6, LED_RGB(0, 31, 20)},
+        {(uint8_t)c12::c12x_fx_ring_freq, 0, 0, 7, LED_RGB(0, 31, 20)},   {(uint8_t)c12::c12x_fx_comp_wet, 0, 0, 8, LED_RGB(10, 14, 31)},
+        {(uint8_t)c12::c12x_fx_comp_thresh, 0, 0, 9, LED_RGB(10, 14, 31)}, {(uint8_t)c12::c12x_fx_comp_ratio, 1, 0, 10, LED_RGB(10, 14, 31)},
+        {(uint8_t)c12::c12x_fx_comp_attack, 0, 0, 11, LED_RGB(10, 14, 31)}, {(uint8_t)c12::c12x_fx_comp_release, 0, 0, 12, LED_RGB(10, 14, 31)},
+        {(uint8_t)c12::c12x_fx_comp_gain, 0, 0, 13, LED_RGB(10, 14, 31)},
+    };
+    static const fx_row_t space[] = {
+        {(uint8_t)c12::c12x_fx_dly_time, 1, 0, 1, c12glue::COL_THROW_D},     {(uint8_t)c12::c12x_fx_dly_feedback, 0, 0, 2, c12glue::COL_THROW_D},
+        {(uint8_t)c12::c12x_fx_dly_filter, 0, 1, 3, c12glue::COL_THROW_D},   {(uint8_t)c12::c12x_fx_dly_wet, 0, 0, 4, c12glue::COL_THROW_D},
+        {(uint8_t)c12::c12x_fx_dly_pingpong, 1, 0, 5, c12glue::COL_THROW_D}, {(uint8_t)c12::c12x_fx_verb_size, 0, 0, 7, c12glue::COL_THROW_R},
+        {(uint8_t)c12::c12x_fx_verb_decay, 0, 0, 8, c12glue::COL_THROW_R},   {(uint8_t)c12::c12x_fx_verb_damp, 0, 0, 9, c12glue::COL_THROW_R},
+        {(uint8_t)c12::c12x_fx_verb_wet, 0, 0, 10, c12glue::COL_THROW_R},
+    };
+    n = bank ? (int)(sizeof(colour) / sizeof(colour[0])) : (int)(sizeof(space) / sizeof(space[0]));
+    return bank ? colour : space;
+  }
+  bool plinky_fx() const { return c12::c12_fx_get(c12::c12x_fx_space_engine) != 0; }
   void fx_page(uint32_t now, bool draw_only) {
     using namespace c12glue;
-    static const fx_row_t rows[] = {
-        {(uint8_t)c12::c12x_fx_drive_wet, 0, 1, LED_RGB(31, 8, 0)},    {(uint8_t)c12::c12x_fx_drive_type, 1, 2, LED_RGB(31, 8, 0)},
-        {(uint8_t)c12::c12x_fx_drive_amount, 0, 3, LED_RGB(31, 8, 0)}, {(uint8_t)c12::c12x_fx_drive_tone, 0, 4, LED_RGB(31, 8, 0)},
-        {(uint8_t)c12::c12x_fx_drive_level, 0, 5, LED_RGB(31, 8, 0)},  {(uint8_t)c12::c12x_fx_ring_wet, 0, 6, LED_RGB(0, 31, 20)},
-        {(uint8_t)c12::c12x_fx_ring_freq, 0, 7, LED_RGB(0, 31, 20)},   {(uint8_t)c12::c12x_fx_comp_wet, 0, 8, LED_RGB(10, 14, 31)},
-        {(uint8_t)c12::c12x_fx_comp_thresh, 0, 9, LED_RGB(10, 14, 31)}, {(uint8_t)c12::c12x_fx_comp_ratio, 1, 10, LED_RGB(10, 14, 31)},
-        {(uint8_t)c12::c12x_fx_comp_attack, 0, 11, LED_RGB(10, 14, 31)}, {(uint8_t)c12::c12x_fx_comp_release, 0, 12, LED_RGB(10, 14, 31)},
-        {(uint8_t)c12::c12x_fx_comp_gain, 0, 13, LED_RGB(10, 14, 31)},
-    };
+    int n;
+    const fx_row_t *rows = fx_rows(fx_bank, n);
     if (!draw_only) {
-      for (int t = 0; t < TRACKS; ++t)
-        if (pressed(t, 0)) { route ^= (uint8_t)(1u << t); apply_mixer(); }
+      if (pressed(8, 0)) fx_bank = 0;
+      if (pressed(9, 0)) fx_bank = 1;
+      if (pressed(11, 0)) c12::c12_fx_set(c12::c12x_fx_space_engine, !plinky_fx());
       if (pressed(15, 0)) c12::c12_fx_set(c12::c12x_fx_limiter, !c12::c12_fx_get(c12::c12x_fx_limiter));
-      for (const fx_row_t &r : rows) {
+      // the freezes: momentary, the same as PERFORM's (and latched there with LATCH)
+      held.freeze_d = down(12, 0) ? 1 : 0;
+      held.freeze_r = down(13, 0) ? 1 : 0;
+      if (fx_bank == 1)
+        for (int t = 0; t < TRACKS; t++)
+          if (pressed(t, 0)) { route ^= (uint8_t)(1u << t); apply_mixer(); }
+      for (int i = 0; i < n; i++) {
+        const fx_row_t &r = rows[i];
         const int v = c12::c12_fx_get(r.fx);
         const int nv = touch_bar(r.y, v, c12::c12_fx_min(r.fx), c12::c12_fx_max(r.fx), r.menu != 0, now);
         if (nv != v) c12::c12_fx_set(r.fx, nv);
       }
-      for (int x = 0; x < 7; ++x)
-        if (pressed(x, 14)) c12::c12_fx_set(c12::c12x_fx_crush_bits, crush_levels[x]);
-      for (int x = 0; x < 8; ++x)
-        if (pressed(8 + x, 14)) c12::c12_fx_set(c12::c12x_fx_rate, rate_levels[x]);
+      if (fx_bank == 1) {
+        for (int x = 0; x < 7; ++x)
+          if (pressed(x, 14)) c12::c12_fx_set(c12::c12x_fx_crush_bits, crush_levels[x]);
+        for (int x = 0; x < 8; ++x)
+          if (pressed(8 + x, 14)) c12::c12_fx_set(c12::c12x_fx_rate, rate_levels[x]);
+      }
       return;
     }
-    for (int t = 0; t < TRACKS; ++t) led(t, 0, (route >> t & 1) ? track_col[t] : LED_RGB(2, 2, 2));
+    led(8, 0, fx_bank == 0 ? WHITE : DIMMEST(COL_THROW_R));
+    led(9, 0, fx_bank == 1 ? WHITE : DIMMEST(page_col[PAGE_FX]));
+    led(11, 0, plinky_fx() ? LED_RGB(20, 20, 6) : LED_RGB(0, 14, 6));
+    const bool fd = (held.freeze_d | latched.freeze_d) != 0, fr = (held.freeze_r | latched.freeze_r) != 0;
+    led(12, 0, fd ? WHITE : DIMMEST(COL_FREEZE));
+    led(13, 0, fr ? WHITE : DIMMEST(COL_FREEZE));
     led(15, 0, c12::c12_fx_get(c12::c12x_fx_limiter) ? LED_RGB(31, 14, 0) : LED_RGB(3, 1, 0));
-    for (const fx_row_t &r : rows) {
-      const int lo = c12::c12_fx_min(r.fx), hi = c12::c12_fx_max(r.fx);
-      // an effect at wet 0 is off: its rows dim
-      int wet_fx = r.y <= 5 ? c12::c12x_fx_drive_wet : r.y <= 7 ? c12::c12x_fx_ring_wet : c12::c12x_fx_comp_wet;
-      uint32_t col = c12::c12_fx_get(wet_fx) || r.fx == wet_fx ? r.col : DIMMEST(r.col);
-      draw_bar(r.y, c12::c12_fx_get(r.fx), lo, hi, r.menu != 0, false, col);
+    if (fx_bank == 1) {
+      for (int t = 0; t < TRACKS; t++) led(t, 0, (route >> t & 1) ? track_col[t] : LED_RGB(2, 2, 2));
+    } else {
+      // each track's sends: amber delay, violet reverb, mixed
+      for (int t = 0; t < TRACKS; t++) {
+        uint32_t c = add_col(fade_col(COL_THROW_D, dsend[t] * 2), fade_col(COL_THROW_R, rsend[t] * 2));
+        led(t, 0, (dsend[t] | rsend[t]) ? c : LED_RGB(1, 1, 1));
+      }
     }
-    const int bits = c12::c12_fx_get(c12::c12x_fx_crush_bits), rate = c12::c12_fx_get(c12::c12x_fx_rate);
-    for (int x = 0; x < 7; ++x) led(x, 14, crush_levels[x] >= bits ? (crush_levels[x] == bits ? LED_RGB(31, 31, 0) : LED_RGB(10, 10, 0)) : LED_RGB(2, 2, 0));
-    for (int x = 0; x < 8; ++x) led(8 + x, 14, rate_levels[x] >= rate ? (rate_levels[x] == rate ? LED_RGB(31, 0, 31) : LED_RGB(10, 0, 10)) : LED_RGB(2, 0, 2));
+    for (int i = 0; i < n; i++) {
+      const fx_row_t &r = rows[i];
+      const int lo = c12::c12_fx_min(r.fx), hi = c12::c12_fx_max(r.fx);
+      uint32_t col = r.col;
+      if (fx_bank == 1) {
+        // an effect at wet 0 is off: its rows dim
+        int wet_fx = r.y <= 5 ? c12::c12x_fx_drive_wet : r.y <= 7 ? c12::c12x_fx_ring_wet : c12::c12x_fx_comp_wet;
+        if (!c12::c12_fx_get(wet_fx) && r.fx != wet_fx) col = DIMMEST(col);
+      } else if (plinky_fx()) {
+        col = DIMMEST(col); // the sends go to Plinky's effects: these rows do nothing then
+      }
+      draw_bar(r.y, c12::c12_fx_get(r.fx), lo, hi, r.menu != 0, r.bipolar != 0, col);
+    }
+    if (fx_bank == 1) {
+      const int bits = c12::c12_fx_get(c12::c12x_fx_crush_bits), rate = c12::c12_fx_get(c12::c12x_fx_rate);
+      for (int x = 0; x < 7; ++x) led(x, 14, crush_levels[x] >= bits ? (crush_levels[x] == bits ? LED_RGB(31, 31, 0) : LED_RGB(10, 10, 0)) : LED_RGB(2, 2, 0));
+      for (int x = 0; x < 8; ++x) led(8 + x, 14, rate_levels[x] >= rate ? (rate_levels[x] == rate ? LED_RGB(31, 0, 31) : LED_RGB(10, 0, 10)) : LED_RGB(2, 0, 2));
+    } else {
+      // the delay and reverb returns, as they sound
+      const int dm = clampi(space_meter[0] / 48, 0, 7), rm = clampi(space_meter[1] / 48, 0, 7);
+      for (int x = 0; x < 7; ++x) {
+        led(x, 14, x < dm ? fade_col(COL_THROW_D, 90 + x * 24) : LED_RGB(1, 1, 1));
+        led(8 + x, 14, x < rm ? fade_col(COL_THROW_R, 90 + x * 24) : LED_RGB(1, 1, 1));
+      }
+    }
+  }
+
+  // ================================================================== performance (PERFORM, REPEAT)
+  // Everything on these pages is temporary: held by a finger, it lasts while the pad is down;
+  // with LATCH on, a tap holds it until tapped again or RELEASE. The pattern, kit and mixer are
+  // untouched (the engine changes what plays, c12_perf_*), until COMMIT writes what is heard.
+  perf_t perf_now() const {
+    perf_t p;
+    p.mute = held.mute | latched.mute;
+    p.solo = held.solo | latched.solo;
+    p.kill = held.kill | latched.kill;
+    p.throw_d = held.throw_d | latched.throw_d;
+    p.throw_r = held.throw_r | latched.throw_r;
+    p.fill = held.fill | latched.fill;
+    p.freeze_d = held.freeze_d | latched.freeze_d;
+    p.freeze_r = held.freeze_r | latched.freeze_r;
+    p.density = held.density ? held.density : latched.density;
+    p.mutate = held.mutate ? held.mutate : latched.mutate;
+    p.stutter = held.stutter ? held.stutter : latched.stutter;
+    p.repeat = held.repeat ? held.repeat : latched.repeat;
+    return p;
+  }
+  // a momentary pad: down holds it; with LATCH, a press toggles the latched copy
+  void momentary_bit(uint8_t &h, uint8_t &l, uint8_t bits, bool is_down, bool was_pressed) {
+    if (latch) {
+      if (was_pressed) l ^= bits;
+      return;
+    }
+    if (is_down) h |= bits;
+  }
+  template <typename T> void momentary_value(T &h, T &l, T value, bool is_down, bool was_pressed) {
+    if (latch) {
+      if (was_pressed) l = l == value ? (T)0 : value;
+      return;
+    }
+    if (is_down) h = value;
+  }
+  void release_all_perf() {
+    memset(&latched, 0, sizeof(latched));
+    rep_latched = 0;
+  }
+  // a new temporary mutation of the pattern, into the buffer the engine is not reading
+  void build_alt(int strength) {
+    const int next = !alt_live;
+    alt[next] = *c12::pocket_seq_pattern();
+    c12::pocket_gen_mutate(&alt[next], (gen_seed << 16) ^ (0x5eedu + ++alt_takes), (unsigned)(strength - 1), track_locks);
+    alt_live = (uint8_t)next;
+    alt_strength = (int8_t)strength;
+  }
+  // every UI frame, on every page: the performance reaches the engine
+  void perf_apply() {
+    using namespace c12glue;
+    const perf_t p = perf_now();
+    push_mutes(false);
+    c12::c12_perf_set_throw(p.throw_d, p.throw_r);
+    c12::c12_perf_set_freeze(p.freeze_d, p.freeze_r);
+    c12::c12_perf_set_fill(p.fill);
+    c12::c12_perf_set_density(p.density);
+    if (p.mutate && p.mutate != alt_strength) {
+      build_alt(p.mutate);
+      c12::c12_perf_set_alt(&alt[alt_live].cell[0][0], 0x7f);
+    } else if (!p.mutate && alt_strength) {
+      alt_strength = 0;
+      c12::c12_perf_set_alt(nullptr, 0);
+    }
+    const uint8_t br = p.repeat ? p.repeat : p.stutter;
+    c12::c12_perf_set_repeat(br, br_mask, br_shape);
+  }
+  // COMMIT: what the performance makes of the pattern and the mutes becomes the project (undoable)
+  void commit_perf(uint32_t now) {
+    using namespace c12glue;
+    const perf_t p = perf_now();
+    push_undo(UNDO_OTHER, now);
+    c12::pocket_pattern *pat = c12::pocket_seq_edit_begin();
+    const int steps = c12::c12x_pattern_steps(pat);
+    if (p.mutate && alt_strength)
+      for (int t = 0; t < TRACKS; t++) memcpy(pat->cell[t], alt[alt_live].cell[t], sizeof(pat->cell[t]));
+    if (p.fill || p.density) {
+      uint32_t (*base)[64] = scratch.cell; // the undo scratch is free between undos
+      memcpy(base, pat->cell, sizeof(scratch.cell));
+      for (int t = 0; t < TRACKS; t++)
+        for (int st = 0; st < steps; st++) {
+          int bar_hits = 0;
+          for (int i = 0; i < 16; i++) bar_hits |= c12::c12x_cell_velocity(base[t][(st & ~15) + i]) != 0;
+          pat->cell[t][st] = c12::c12_perf_cell(t, st, 0, base[t][st], bar_hits, p.fill, p.density);
+        }
+    }
+    c12::pocket_seq_edit_commit();
+    mute = (uint8_t)((mute | p.mute | p.kill) & 0x7f);
+    if (p.solo) solo = p.solo;
+    release_all_perf();
+    memset(&held, 0, sizeof(held));
+    alt_strength = 0;
+    c12::c12_perf_set_alt(nullptr, 0);
+    apply_mixer();
+  }
+
+  // ---- scenes: the mixer and the FX, recalled at the next bar ----
+  void scene_store(int i) {
+    using namespace c12glue;
+    scene_t &sc = scenes[i];
+    sc.used = 1;
+    memcpy(sc.level, level, sizeof(sc.level));
+    memcpy(sc.delay, dsend, sizeof(sc.delay));
+    memcpy(sc.reverb, rsend, sizeof(sc.reverb));
+    sc.mute = mute;
+    sc.solo = solo;
+    sc.route = route;
+    sc.master = master;
+    for (int f = 0; f < c12::c12x_fx_params && f < 32; f++) sc.fx[f] = (uint8_t)c12::c12_fx_get(f);
+    scene_active = (uint8_t)i;
+  }
+  void scene_recall(int i) {
+    using namespace c12glue;
+    const scene_t &sc = scenes[i];
+    if (!sc.used) return;
+    c12::c12_mix_state ms;
+    memcpy(ms.level, sc.level, sizeof(ms.level));
+    memcpy(ms.delay, sc.delay, sizeof(ms.delay));
+    memcpy(ms.reverb, sc.reverb, sizeof(ms.reverb));
+    ms.mute = (uint8_t)(sc.mute | perf_mute());
+    ms.solo = perf_solo() ? perf_solo() : sc.solo;
+    ms.route = sc.route;
+    ms.master = sc.master;
+    if (c12::c12_mix_schedule(&ms, scene_quant && !stopped()) == 0) scene_pending = (int8_t)i;
+  }
+  // when the engine has taken the scene's mixer (at the bar), the rest follows: FX and the mirrors
+  void scene_service() {
+    using namespace c12glue;
+    if (scene_pending < 0 || c12::c12_mix_schedule_pending()) return;
+    const scene_t &sc = scenes[scene_pending];
+    memcpy(level, sc.level, sizeof(level));
+    memcpy(dsend, sc.delay, sizeof(dsend));
+    memcpy(rsend, sc.reverb, sizeof(rsend));
+    mute = sc.mute;
+    solo = sc.solo;
+    route = sc.route;
+    master = sc.master;
+    for (int f = 0; f < c12::c12x_fx_params && f < 32; f++)
+      if (f != c12::c12x_fx_space_engine) c12::c12_fx_set(f, sc.fx[f]);
+    scene_active = (uint8_t)scene_pending;
+    scene_pending = -1;
+    apply_mixer();
+  }
+
+  // row 15 x9-11 on PERFORM and REPEAT: LATCH, COMMIT (PERFORM only, hold), RELEASE
+  void perf_row15(uint32_t now, bool with_commit) {
+    using namespace c12glue;
+    if (pressed(9, 15)) {
+      latch = !latch;
+      if (!latch) release_all_perf();
+    }
+    if (with_commit) {
+      if (pressed(10, 15)) { commit_t0 = now; commit_done = false; }
+      if (down(10, 15) && !commit_done && commit_t0 && now - commit_t0 >= COMMIT_US) {
+        commit_perf(now);
+        commit_done = true;
+        show_ripple(10, 15 + oy, RED);
+      }
+      if (!down(10, 15)) commit_t0 = 0;
+    }
+    if (pressed(11, 15)) release_all_perf();
+  }
+  void draw_perf_row15(uint32_t now, bool with_commit) {
+    using namespace c12glue;
+    led(9, 15, latch ? COL_LATCH : DIMMEST(COL_LATCH));
+    if (with_commit) {
+      uint32_t c = LED_RGB(8, 0, 0);
+      if (commit_t0 && !commit_done) c = lerp_col(c, LED_RGB(31, 0, 0), clampi((int)((now - commit_t0) * 256 / COMMIT_US), 0, 256));
+      led(10, 15, c);
+    }
+    const perf_t p = perf_now();
+    const bool any = (latched.mute | latched.solo | latched.kill | latched.throw_d | latched.throw_r | latched.fill | latched.freeze_d |
+                      latched.freeze_r | latched.density | latched.mutate | latched.stutter | latched.repeat | rep_latched) != 0;
+    (void)p;
+    led(11, 15, any ? LED_RGB(12, 12, 12) : LED_RGB(2, 2, 2));
+  }
+  // a momentary pad's colour: dim at rest, its colour lit, white-tinted when LATCH holds it
+  uint32_t mom_col(uint32_t col, bool is_held, bool is_latched) {
+    if (is_latched) return add_col(col, LED_RGB(8, 8, 8));
+    return is_held ? col : faint(col);
+  }
+
+  // the step within the bar, as a row (timing for the hands)
+  void draw_bar_position(int y) {
+    const int pos = c12::pocket_seq_position();
+    const bool valid = c12::pocket_seq_playing() && pos != c12::c12x_not_playing;
+    for (int x = 0; x < 16; x++) led(x, y, valid && (pos & 15) == x ? WHITE : ((x & 3) == 0 ? LED_RGB(2, 2, 2) : 0));
+  }
+  void draw_meters(int y) {
+    using namespace c12glue;
+    for (int t = 0; t < TRACKS; t++) led(t, y, fade_col(track_col[t], clampi(meter[t] / 64, 0, 255)));
+    led(8, y, fade_col(WHITE, clampi(meter[TRACKS] / 64, 0, 255)));
+    led(10, y, fade_col(COL_THROW_D, clampi(space_meter[0] / 32, 0, 255)));
+    led(11, y, fade_col(COL_THROW_R, clampi(space_meter[1] / 32, 0, 255)));
+  }
+
+  // ================================================================== PERFORM page
+  void perform_page(uint32_t now, bool draw_only) {
+    using namespace c12glue;
+    static const uint8_t kills[4] = {0x03, 0x0c, 0x70, 0x7f};
+    if (!draw_only) {
+      // what is held is worked out afresh each frame: a pad let go is released at once
+      held.mute = held.solo = held.kill = held.throw_d = held.throw_r = held.fill = 0;
+      held.freeze_d = held.freeze_r = 0;
+      held.density = 0;
+      held.mutate = 0;
+      held.stutter = 0;
+      for (int t = 0; t < TRACKS; t++) {
+        momentary_bit(held.mute, latched.mute, (uint8_t)(1u << t), down(t, 0), pressed(t, 0));
+        momentary_bit(held.solo, latched.solo, (uint8_t)(1u << t), down(8 + t, 0), pressed(8 + t, 0));
+        momentary_bit(held.throw_d, latched.throw_d, (uint8_t)(1u << t), down(t, 2), pressed(t, 2));
+        momentary_bit(held.throw_r, latched.throw_r, (uint8_t)(1u << t), down(8 + t, 2), pressed(8 + t, 2));
+        momentary_bit(held.fill, latched.fill, (uint8_t)(1u << t), down(t, 4), pressed(t, 4));
+      }
+      for (int k = 0; k < 4; k++)
+        momentary_bit(held.kill, latched.kill, kills[k], down(2 * k, 1) || down(2 * k + 1, 1), pressed(2 * k, 1) || pressed(2 * k + 1, 1));
+      momentary_bit(held.throw_d, latched.throw_d, 0x7f, down(8, 1) || down(9, 1), pressed(8, 1) || pressed(9, 1));
+      momentary_bit(held.throw_r, latched.throw_r, 0x7f, down(10, 1) || down(11, 1), pressed(10, 1) || pressed(11, 1));
+      momentary_bit(held.freeze_d, latched.freeze_d, 1, down(12, 1) || down(13, 1), pressed(12, 1) || pressed(13, 1));
+      momentary_bit(held.freeze_r, latched.freeze_r, 1, down(14, 1) || down(15, 1), pressed(14, 1) || pressed(15, 1));
+      momentary_bit(held.fill, latched.fill, 0x0e, down(8, 4) || down(9, 4), pressed(8, 4) || pressed(9, 4));
+      momentary_bit(held.fill, latched.fill, 0x7f, down(10, 4) || down(11, 4), pressed(10, 4) || pressed(11, 4));
+      for (int k = 0; k < 3; k++)
+        momentary_value<int8_t>(held.mutate, latched.mutate, (int8_t)(k + 1), down(2 * k, 5) || down(2 * k + 1, 5),
+                                pressed(2 * k, 5) || pressed(2 * k + 1, 5));
+      // a pad held anew mutates afresh: a new take each press
+      for (int k = 0; k < 3; k++)
+        if ((pressed(2 * k, 5) || pressed(2 * k + 1, 5)) && !latch) alt_strength = 0;
+      for (int x = 0; x < 16; x++) {
+        const int8_t d = (int8_t)density_of(x);
+        if (d) momentary_value<int8_t>(held.density, latched.density, d, down(x, 6), pressed(x, 6));
+        else if (pressed(x, 6) && latch) latched.density = 0;
+      }
+      for (int k = 0; k < 4; k++)
+        momentary_value<uint8_t>(held.stutter, latched.stutter, stutter_lengths[k], down(2 * k, 8) || down(2 * k + 1, 8),
+                                 pressed(2 * k, 8) || pressed(2 * k + 1, 8));
+      // scenes: tap recalls (at the next bar when QUANTISE is on), hold one second stores
+      for (int i = 0; i < SCENES; i++) {
+        if (pressed(i, 10)) { scene_t0[i] = now; scene_stored[i] = false; }
+        if (down(i, 10) && scene_t0[i] && !scene_stored[i] && now - scene_t0[i] >= SCENE_STORE_US) {
+          scene_store(i);
+          scene_stored[i] = true;
+          show_ripple(i, 10 + oy, COL_SCENE);
+        }
+        if (!down(i, 10) && scene_t0[i]) {
+          if (!scene_stored[i]) scene_recall(i);
+          scene_t0[i] = 0;
+        }
+      }
+      if (pressed(9, 10)) scene_quant = !scene_quant;
+      perf_row15(now, true);
+      return;
+    }
+    const perf_t p = perf_now();
+    for (int t = 0; t < TRACKS; t++) {
+      const uint8_t b = (uint8_t)(1u << t);
+      led(t, 0, (p.mute & b) ? mom_col(LED_RGB(31, 0, 0), true, latched.mute & b) : faint(track_col[t]));
+      led(8 + t, 0, (p.solo & b) ? mom_col(LED_RGB(31, 31, 0), true, latched.solo & b) : LED_RGB(3, 3, 0));
+      led(t, 2, mom_col(COL_THROW_D, held.throw_d & b, latched.throw_d & b));
+      led(8 + t, 2, mom_col(COL_THROW_R, held.throw_r & b, latched.throw_r & b));
+      led(t, 4, mom_col(COL_FILL, held.fill & b, latched.fill & b));
+    }
+    for (int k = 0; k < 4; k++) {
+      const uint32_t c = mom_col(COL_KILL, (held.kill & kills[k]) == kills[k], (latched.kill & kills[k]) == kills[k]);
+      led(2 * k, 1, c);
+      led(2 * k + 1, 1, c);
+    }
+    const uint32_t td = mom_col(COL_THROW_D, held.throw_d == 0x7f, latched.throw_d == 0x7f);
+    const uint32_t tr = mom_col(COL_THROW_R, held.throw_r == 0x7f, latched.throw_r == 0x7f);
+    const uint32_t fd = mom_col(COL_FREEZE, held.freeze_d, latched.freeze_d), fr = mom_col(COL_FREEZE, held.freeze_r, latched.freeze_r);
+    led(8, 1, td); led(9, 1, td); led(10, 1, tr); led(11, 1, tr);
+    led(12, 1, fd); led(13, 1, fd); led(14, 1, fr); led(15, 1, fr);
+    const uint32_t fdr = mom_col(COL_FILL, (held.fill & 0x0e) == 0x0e, (latched.fill & 0x0e) == 0x0e);
+    const uint32_t fal = mom_col(COL_FILL, held.fill == 0x7f, latched.fill == 0x7f);
+    led(8, 4, fdr); led(9, 4, fdr); led(10, 4, fal); led(11, 4, fal);
+    for (int k = 0; k < 3; k++) {
+      const uint32_t c = mom_col(fade_col(COL_MUTATE, 140 + k * 58), held.mutate == k + 1, latched.mutate == k + 1);
+      led(2 * k, 5, c);
+      led(2 * k + 1, 5, c);
+    }
+    for (int x = 0; x < 16; x++) {
+      const int d = density_of(x);
+      uint32_t base = d < 0 ? LED_RGB(0, 10, 31) : d > 0 ? LED_RGB(31, 12, 0) : LED_RGB(14, 14, 14);
+      base = fade_col(base, 90 + (d < 0 ? -d : d) * 165 / 100);
+      const bool on = d && p.density == d;
+      led(x, 6, on ? mom_col(base, held.density == d, latched.density == d) : (d ? faint(base) : (p.density ? LED_RGB(3, 3, 3) : LED_RGB(10, 10, 10))));
+    }
+    for (int k = 0; k < 4; k++) {
+      const uint32_t c = mom_col(fade_col(COL_STUTTER, 120 + k * 45), held.stutter == stutter_lengths[k], latched.stutter == stutter_lengths[k]);
+      led(2 * k, 8, c);
+      led(2 * k + 1, 8, c);
+    }
+    for (int i = 0; i < SCENES; i++) {
+      uint32_t c = scenes[i].used ? fade_col(COL_SCENE, 110) : LED_RGB(2, 2, 1);
+      if (scene_active == i) c = WHITE;
+      if (scene_pending == i && ((now >> 17) & 1)) c = COL_SCENE; // waiting for the bar: blinks
+      if (scene_t0[i] && !scene_stored[i]) c = lerp_col(c, COL_SCENE, clampi((int)((now - scene_t0[i]) * 256 / SCENE_STORE_US), 0, 256));
+      led(i, 10, c);
+    }
+    led(9, 10, scene_quant ? LED_RGB(20, 20, 20) : LED_RGB(3, 3, 3));
+    draw_bar_position(13);
+    draw_meters(14);
+    draw_perf_row15(now, true);
+  }
+  // DENSITY row: x0-6 thinner (-100 .. -14), x7-8 as written, x9-15 denser (+14 .. +100)
+  static int density_of(int x) {
+    if (x <= 6) return -(7 - x) * 100 / 7;
+    if (x >= 9) return (x - 8) * 100 / 7;
+    return 0;
+  }
+
+  // ================================================================== REPEAT page
+  int rep_velocity(int p) const {
+    // never silent: a light touch still plays (45), a firm one 127
+    const int c = touch_pressure_curve_q7(clampi(p, 0, 255));
+    return clampi(45 + c * 82 / 127, 1, 127);
+  }
+  void repeat_page(uint32_t now, bool draw_only) {
+    using namespace c12glue;
+    if (!draw_only) {
+      for (int t = 0; t < TRACKS; t++) {
+        bool dn = false, pr = false;
+        int pz = 0;
+        for (int y = 0; y < 3; y++)
+          for (int dx = 0; dx < 2; dx++) {
+            dn = dn || down(2 * t + dx, y);
+            pr = pr || pressed(2 * t + dx, y);
+            pz = maxi(pz, pressure(2 * t + dx, y));
+          }
+        if (pr) roll_target = (uint8_t)t;
+        if (latch && pr) {
+          rep_latched ^= (uint8_t)(1u << t);
+          rep_lvel[t] = (uint8_t)rep_velocity(pz);
+        }
+        const bool live = !latch && dn;
+        const bool on = live || (rep_latched >> t & 1);
+        uint8_t div = rep_div;
+        int vel = live ? rep_velocity(pz) : (rep_lvel[t] ? rep_lvel[t] : 100), chance = 100;
+        if (rep_mode == 1 || rep_mode == 3) vel = 100; // RATE and FIXED: one velocity
+        if (rep_mode == 1 && live) {
+          // pressure picks the rate: the chosen one, twice as fast, four times (with some hysteresis)
+          uint8_t &lv = rep_level[t];
+          if (lv == 0 && pz > 120) lv = 1;
+          if (lv == 1 && pz > 200) lv = 2;
+          if (lv == 2 && pz < 180) lv = 1;
+          if (lv == 1 && pz < 100) lv = 0;
+          for (int i = 0; i < lv; i++) div = faster_div(div);
+        } else if (!live) {
+          rep_level[t] = 0;
+        }
+        if (rep_mode == 2 && live) chance = clampi(25 + pz * 75 / 200, 25, 100); // CHANCE: pressure is how many sound
+        if (live) rep_shown_vel = (uint8_t)vel;
+        c12::c12_perf_note_repeat(t, on ? div : 0, vel, chance, rep_curve);
+      }
+      for (int x = 0; x < 16; x++)
+        if (pressed(x, 4) && rep_rates[x]) rep_div = rep_rates[x];
+      for (int x = 0; x < 4; x++)
+        if (pressed(x, 5)) rep_mode = (uint8_t)x;
+      for (int x = 0; x < c12::c12x_curves; x++)
+        if (pressed(8 + x, 5)) rep_curve = (uint8_t)x;
+      // rolls by hand: on the held repeat pads' tracks, else the target; velocity from the press
+      for (int x = 0; x < 6; x++)
+        if (pressed(x, 7)) {
+          const int v = rep_velocity(pressure(x, 7));
+          const uint32_t cell = c12::c12x_cell_with_ext(c12::c12x_cell(v, 0), 0, 0, (unsigned)(x + 1));
+          bool any = false;
+          for (int t = 0; t < TRACKS; t++)
+            if (down(2 * t, 0) || down(2 * t + 1, 0) || down(2 * t, 1) || down(2 * t + 1, 1) || down(2 * t, 2) || down(2 * t + 1, 2)) {
+              c12::c12_perf_play(t, cell);
+              any = true;
+            }
+          if (!any) c12::c12_perf_play(roll_target, cell);
+        }
+      for (int t = 0; t < TRACKS; t++)
+        if (pressed(8 + t, 7)) roll_target = (uint8_t)t;
+      held.repeat = 0;
+      for (int k = 0; k < 8; k++)
+        momentary_value<uint8_t>(held.repeat, latched.repeat, br_lengths[k], down(2 * k, 9) || down(2 * k + 1, 9),
+                                 pressed(2 * k, 9) || pressed(2 * k + 1, 9));
+      for (int x = 0; x < 3; x++)
+        if (pressed(x, 10)) br_shape = (uint8_t)x;
+      for (int t = 0; t < TRACKS; t++)
+        if (pressed(8 + t, 10)) br_mask ^= (uint8_t)(1u << t);
+      perf_row15(now, false);
+      return;
+    }
+    for (int t = 0; t < TRACKS; t++) {
+      bool dn = false;
+      for (int y = 0; y < 3; y++)
+        for (int dx = 0; dx < 2; dx++) dn = dn || down(2 * t + dx, y);
+      const bool lat = rep_latched >> t & 1;
+      uint32_t c = dn ? track_col[t] : lat ? add_col(track_col[t], LED_RGB(8, 8, 8)) : DIMMEST(track_col[t]);
+      // the hits as they land
+      if (dn || lat) c = add_col(DIMMER(c), fade_col(track_col[t], clampi(meter[t] / 48, 0, 255)));
+      for (int y = 0; y < 3; y++)
+        for (int dx = 0; dx < 2; dx++) led(2 * t + dx, y, c);
+    }
+    // x14-15 y0-2: the velocity the press gives
+    const int vb = clampi(rep_shown_vel * 3 / 128, 0, 2);
+    for (int y = 0; y < 3; y++) {
+      const uint32_t c = 2 - y <= vb && rep_shown_vel ? LED_RGB(31, 31, 31) : LED_RGB(2, 2, 2);
+      led(14, y, c);
+      led(15, y, c);
+    }
+    for (int x = 0; x < 16; x++)
+      if (rep_rates[x]) {
+        const bool trip = x >= 6 && x <= 9, dot = x >= 11;
+        const uint32_t base = trip ? LED_RGB(0, 24, 31) : dot ? LED_RGB(31, 20, 0) : LED_RGB(24, 0, 31);
+        led(x, 4, rep_rates[x] == rep_div ? WHITE : DIMMEST(base));
+      }
+    for (int x = 0; x < 4; x++) led(x, 5, rep_mode == x ? LED_RGB(31, 31, 31) : LED_RGB(4, 4, 4));
+    for (int x = 0; x < c12::c12x_curves; x++) led(8 + x, 5, rep_curve == x ? LED_RGB(0, 31, 12) : LED_RGB(0, 4, 2));
+    for (int x = 0; x < 6; x++) led(x, 7, down(x, 7) ? WHITE : LED_RGB(20, 20, 0));
+    for (int t = 0; t < TRACKS; t++) led(8 + t, 7, roll_target == t ? track_col[t] : faint(track_col[t]));
+    const perf_t p = perf_now();
+    for (int k = 0; k < 8; k++) {
+      const uint32_t c = mom_col(fade_col(COL_STUTTER, 100 + k * 22), held.repeat == br_lengths[k], latched.repeat == br_lengths[k]);
+      led(2 * k, 9, c);
+      led(2 * k + 1, 9, c);
+    }
+    (void)p;
+    for (int x = 0; x < 3; x++) led(x, 10, br_shape == x ? LED_RGB(31, 0, 24) : LED_RGB(4, 0, 3));
+    for (int t = 0; t < TRACKS; t++) led(8 + t, 10, (br_mask >> t & 1) ? track_col[t] : LED_RGB(2, 2, 2));
+    draw_bar_position(13);
+    draw_meters(14);
+    draw_perf_row15(now, false);
+  }
+
+  // ================================================================== TEMPO (row 15 x8 on every page)
+  // tap: tap tempo (from the second tap; a pause of 2 s starts again). Hold: the overlay below,
+  // for as long as it is held, over the page's rows 0-14. Plinky's own tempo is set
+  // (set_tempo_bpm): there is one clock, and the sequencer follows it as it follows the side buttons.
+  int bpm_now() const { return (int)(get_tempo_bpm() + 0.5f); }
+  void set_bpm(int bpm) {
+    bpm = clampi(bpm, c12::c12x_bpm_min, c12::c12x_bpm_max);
+    set_tempo_bpm((float)bpm, true);
+  }
+  void tap_at(uint32_t t) {
+    if (tap_count && t - tap_last > c12glue::TAP_RESET_US) tap_count = 0;
+    if (tap_count < 4) tap_times[tap_count++] = t;
+    else {
+      memmove(tap_times, tap_times + 1, 3 * sizeof(tap_times[0]));
+      tap_times[3] = t;
+    }
+    tap_last = t;
+    if (tap_count >= 2) {
+      const uint32_t span = tap_times[tap_count - 1] - tap_times[0];
+      const float period = (float)span / (float)(tap_count - 1);
+      if (period > 0.f) set_bpm((int)(60000000.f / period + 0.5f));
+      tempo_tapped = 1;
+    }
+  }
+  void tempo_pad(uint32_t now) {
+    using namespace c12glue;
+    if (pressed(TEMPO_X, 15)) {
+      tempo_t0 = now;
+      tempo_overlay = 0;
+    }
+    if (tempo_t0 && down(TEMPO_X, 15) && !tempo_overlay && now - tempo_t0 >= HOLD_US) tempo_overlay = 1;
+    if (tempo_t0 && !down(TEMPO_X, 15)) {
+      if (!tempo_overlay) tap_at(tempo_t0); // a tap is timed from its press
+      tempo_t0 = 0;
+      tempo_overlay = 0;
+      if (nudge_base) { set_bpm(nudge_base); nudge_base = 0; }
+    }
+  }
+  void tempo_overlay_touch(uint32_t now) {
+    using namespace c12glue;
+    (void)now;
+    static const int steps[6] = {-10, -5, -1, 1, 5, 10};
+    static const int xs[6] = {0, 1, 2, 13, 14, 15};
+    const int base = nudge_base ? nudge_base : bpm_now();
+    for (int i = 0; i < 6; i++)
+      if (pressed(xs[i], 7)) set_bpm(base + steps[i]);
+    if (pressed(6, 7) || pressed(7, 7)) set_bpm(base / 2);
+    if (pressed(8, 7) || pressed(9, 7)) set_bpm(base * 2);
+    for (int x = 0; x < 16; x++)
+      if (pressed(x, 9)) set_bpm(tempo_presets[x]);
+    // nudge: held, about 4 % slower or faster; let go, back
+    const bool slow = down(0, 11) || down(1, 11) || down(2, 11) || down(3, 11);
+    const bool fast = down(12, 11) || down(13, 11) || down(14, 11) || down(15, 11);
+    if (slow || fast) {
+      if (!nudge_base) nudge_base = bpm_now();
+      const int d = maxi(1, (nudge_base * 4 + 50) / 100);
+      set_bpm(nudge_base + (fast ? d : -d));
+    } else if (nudge_base) {
+      set_bpm(nudge_base);
+      nudge_base = 0;
+    }
+    for (int x = 0; x < 16; x++)
+      if (pressed(x, 13)) tap_at(now);
+  }
+  void draw_tempo_overlay(uint32_t now) {
+    using namespace c12glue;
+    const int bpm = bpm_now();
+    const uint32_t dc = tempo_tapped ? LED_RGB(31, 24, 0) : WHITE;
+    const int d[3] = {bpm / 100, bpm / 10 % 10, bpm % 10};
+    for (int k = 0; k < 3; k++) {
+      if (k == 0 && d[0] == 0) continue;
+      for (int r = 0; r < 5; r++)
+        for (int c = 0; c < 3; c++)
+          if (digit_rows[d[k]][r] >> (2 - c) & 1) led(1 + k * 4 + c, 1 + r, dc);
+    }
+    led(14, 3, beat_on(now) ? WHITE : LED_RGB(3, 3, 3));
+    static const int xs[6] = {0, 1, 2, 13, 14, 15};
+    for (int i = 0; i < 6; i++) led(xs[i], 7, fade_col(i < 3 ? LED_RGB(0, 10, 31) : LED_RGB(31, 12, 0), 100 + (i < 3 ? 2 - i : i - 3) * 70));
+    led(6, 7, LED_RGB(0, 20, 31)); led(7, 7, LED_RGB(0, 20, 31));
+    led(8, 7, LED_RGB(31, 20, 0)); led(9, 7, LED_RGB(31, 20, 0));
+    for (int x = 0; x < 16; x++) led(x, 9, tempo_presets[x] == bpm ? WHITE : LED_RGB(6, 6, 2));
+    const uint32_t ns = nudge_base && bpm < nudge_base ? WHITE : LED_RGB(0, 6, 14), nf = nudge_base && bpm > nudge_base ? WHITE : LED_RGB(14, 6, 0);
+    for (int x = 0; x < 4; x++) { led(x, 11, ns); led(12 + x, 11, nf); }
+    for (int x = 0; x < 16; x++) led(x, 13, down(x, 13) ? WHITE : (beat_on(now) ? LED_RGB(10, 10, 10) : LED_RGB(3, 3, 3)));
+    // where the tempo sits, 30 to 300
+    const int at = clampi((bpm - 30) * 15 / 270, 0, 15);
+    for (int x = 0; x < 16; x++) led(x, 14, x == at ? dc : (x < at ? LED_RGB(4, 4, 4) : LED_RGB(1, 1, 1)));
+  }
+  // the beat, for the TEMPO pad and overlay: the sequencer's quarter notes, or the clock when stopped
+  bool beat_on(uint32_t now) const {
+    const int pos = c12::pocket_seq_position();
+    if (c12::pocket_seq_playing() && pos != c12::c12x_not_playing) return (pos & 3) == 0;
+    const uint32_t q = (uint32_t)(60000000.f / (float)maxi(30, bpm_now()));
+    return now % q < q / 6;
   }
 
   // ================================================================== row 15 on every page
@@ -1015,10 +1761,19 @@ struct clatter12 : panel_t {
       else start_transport();
     }
   }
-  void draw_nav(int page) {
+  // REPEAT not shown: what LATCH holds keeps repeating, nothing else does
+  void repeat_background() {
+    for (int t = 0; t < c12glue::TRACKS; t++) {
+      const bool on = rep_latched >> t & 1;
+      c12::c12_perf_note_repeat(t, on ? rep_div : 0, rep_lvel[t] ? rep_lvel[t] : 100, 100, rep_curve);
+    }
+  }
+  void draw_nav(int page, uint32_t now) {
     using namespace c12glue;
     const bool playing = c12::pocket_seq_playing() != 0;
     for (int p = 0; p < PAGES; ++p) led(p, 15, p == page ? WHITE : faint(page_col[p]));
+    // TEMPO: flashes on the beat; white while its overlay is open
+    led(TEMPO_X, 15, tempo_overlay ? WHITE : beat_on(now) ? LED_RGB(31, 31, 31) : LED_RGB(6, 2, 2));
     led(12, 15, hist_undo ? LED_RGB(10, 10, 10) : LED_RGB(1, 1, 1));
     led(13, 15, hist_redo ? LED_RGB(10, 10, 10) : LED_RGB(1, 1, 1));
     led(14, 15, playing ? LED_RGB(10, 0, 0) : LED_RGB(3, 0, 0));
@@ -1046,7 +1801,7 @@ struct clatter12 : panel_t {
     p.solo = solo;
     p.route = route;
     p.master = master;
-    for (int f = 0; f < c12::c12x_fx_params && f < 16; ++f) p.fx[f] = (uint8_t)c12::c12_fx_get(f);
+    for (int f = 0; f < c12::c12x_fx_params && f < 32; ++f) p.fx[f] = (uint8_t)c12::c12_fx_get(f);
     p.style = style;
     p.density = density;
     p.complexity = complexity;
@@ -1058,7 +1813,61 @@ struct clatter12 : panel_t {
     p.kit_amount = kit_amount;
     p.gen_seed = gen_seed;
     p.kit_seed = kit_seed;
+    p.rep_div = rep_div;
+    p.rep_mode = rep_mode;
+    p.rep_curve = rep_curve;
+    p.br_shape = br_shape;
+    p.br_mask = br_mask;
+    p.scene_quant = scene_quant;
+    p.roll_target = roll_target;
+    memcpy(p.scenes, scenes, sizeof(p.scenes));
     p.crc = c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc));
+  }
+  // A version-1 project (proj_v1, checked) as version 2 in proj: steps converted to the new
+  // articulation bits, FX values carried (the SPACE ones take their defaults), no scenes.
+  bool convert_v1() {
+    using namespace c12glue;
+    const project_v1_t &o = proj_v1;
+    if (o.magic != PROJECT_MAGIC || o.version != 1 || o.bytes != sizeof(project_v1_t)) return false;
+    if (o.crc != c12::pocket_crc32(0, &o, (unsigned)__builtin_offsetof(project_v1_t, crc))) return false;
+    project_t &p = proj;
+    memset(&p, 0, sizeof(p));
+    p.magic = PROJECT_MAGIC;
+    p.version = PROJECT_VERSION;
+    p.bytes = (uint16_t)sizeof(p);
+    for (int t = 0; t < TRACKS; t++)
+      for (int st = 0; st < 64; st++) p.cell[t][st] = o.cell[t][st] >> 27 ? 0u : c12::c12_cell_from_v1(o.cell[t][st]);
+    p.last_page = o.last_page;
+    p.swing = o.swing;
+    p.bpm = o.bpm;
+    memcpy(p.kit, o.kit, sizeof(p.kit));
+    memcpy(p.level, o.level, sizeof(p.level));
+    memcpy(p.delay, o.delay, sizeof(p.delay));
+    memcpy(p.reverb, o.reverb, sizeof(p.reverb));
+    p.mute = o.mute;
+    p.solo = o.solo;
+    p.route = o.route;
+    p.master = o.master;
+    for (int f = 0; f < 32; f++) p.fx[f] = f < 16 ? o.fx[f] : (uint8_t)c12::c12_fx_get(f);
+    // version 1's sends went to Plinky's delay and reverb: they still do
+    p.fx[c12::c12x_fx_space_engine] = 1;
+    p.style = o.style;
+    p.density = o.density;
+    p.complexity = o.complexity;
+    p.mut_strength = o.mut_strength;
+    p.track_locks = o.track_locks;
+    p.sound_locks = o.sound_locks;
+    p.kit_character = o.kit_character;
+    p.wildness = o.wildness;
+    p.kit_amount = o.kit_amount;
+    p.gen_seed = o.gen_seed;
+    p.kit_seed = o.kit_seed;
+    p.rep_div = c12::c12x_div_16;
+    p.br_mask = 0x7f;
+    p.scene_quant = 1;
+    p.roll_target = 3;
+    p.crc = c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc));
+    return true;
   }
   // Checks everything before anything reaches the engine; a project that fails changes nothing.
   bool project_valid(const c12glue::project_t &p) const {
@@ -1077,7 +1886,8 @@ struct clatter12 : panel_t {
         // every field in range, or the step goes
         unsigned v = c12::c12x_cell_velocity(c), var = c12::c12x_cell_variation(c), cond = c12::c12x_cell_condition(c);
         bool ok = v <= 127 && (int)var <= c12::c12x_variation_last(t) && (int)cond < c12::c12x_conditions &&
-                  (int)c12::c12x_cell_ratchet(c) < c12::c12x_ratchets && !(c >> 27);
+                  (int)c12::c12x_cell_ratchet(c) < c12::c12x_ratchets && (int)c12::c12x_cell_curve(c) < c12::c12x_curves &&
+                  (int)c12::c12x_cell_roll(c) < c12::c12x_rolls && !(c >> 29);
         unsigned tone = (c >> 8) & 0xff;
         ok = ok && (tone == 0 || tone >= 128);
         pat->cell[t][s] = ok ? c : 0;
@@ -1104,7 +1914,7 @@ struct clatter12 : panel_t {
     route = p.route & 0x7f;
     master = p.master & 0x7f;
     apply_mixer();
-    for (int f = 0; f < c12::c12x_fx_params && f < 16; ++f) c12::c12_fx_set(f, p.fx[f]); // c12_fx_set clamps
+    for (int f = 0; f < c12::c12x_fx_params && f < 32; ++f) c12::c12_fx_set(f, p.fx[f]); // c12_fx_set clamps
     style = (uint8_t)(p.style % c12::c12x_gen_styles);
     density = (uint8_t)clampi(p.density, 0, 100);
     complexity = (uint8_t)clampi(p.complexity, 0, 100);
@@ -1116,6 +1926,30 @@ struct clatter12 : panel_t {
     kit_amount = (uint8_t)clampi(p.kit_amount, 0, 100);
     gen_seed = p.gen_seed;
     kit_seed = p.kit_seed;
+    rep_div = p.rep_div && p.rep_div < c12::c12x_divs ? p.rep_div : (uint8_t)c12::c12x_div_16;
+    rep_mode = (uint8_t)(p.rep_mode & 3);
+    rep_curve = (uint8_t)(p.rep_curve % c12::c12x_curves);
+    br_shape = (uint8_t)(p.br_shape % 3);
+    br_mask = p.br_mask & 0x7f;
+    scene_quant = p.scene_quant ? 1 : 0;
+    roll_target = (uint8_t)(p.roll_target % TRACKS);
+    for (int i = 0; i < SCENES; i++) {
+      scenes[i] = p.scenes[i];
+      scene_t &sc = scenes[i];
+      sc.used = sc.used ? 1 : 0;
+      for (int t = 0; t < TRACKS; t++) {
+        sc.level[t] &= 0x7f;
+        sc.delay[t] &= 0x7f;
+        sc.reverb[t] &= 0x7f;
+      }
+      sc.mute &= 0x7f;
+      sc.solo &= 0x7f;
+      sc.route &= 0x7f;
+      sc.master &= 0x7f;
+    }
+    scene_active = 0xff;
+    scene_pending = -1;
+    release_all_perf();
     sel_track = sel_step = -1;
   }
 
@@ -1134,7 +1968,13 @@ struct clatter12 : panel_t {
     FIELD_BASE64("clatter12", &proj, bytes, (int)sizeof(proj));
     OBJECT_END(s);
     if (s.reading) {
-      load_pending = bytes == (int)sizeof(proj) && project_valid(proj);
+      if (bytes == (int)sizeof(c12glue::project_v1_t)) {
+        // CLATTER 12 0.0.2's projects: version 1, converted
+        memcpy(&proj_v1, &proj, sizeof(proj_v1));
+        load_pending = convert_v1();
+      } else {
+        load_pending = bytes == (int)sizeof(proj) && project_valid(proj);
+      }
       if (load_pending) want_default = false;
       else printf("clatter12: the saved project is not one this version reads (%d bytes); not loaded\n", bytes);
     }
@@ -1167,6 +2007,7 @@ struct clatter12 : panel_t {
 
   // levels on the grid: the engine's peaks, read (and reset) every frame, decaying between hits
   uint16_t meter[c12glue::TRACKS + 1];
+  uint16_t space_meter[2];
   void update_meters() {
     using namespace c12glue;
     c12::c12_engine_profile pr;
@@ -1174,6 +2015,10 @@ struct clatter12 : panel_t {
     for (int t = 0; t < TRACKS; ++t) {
       uint16_t m = pr.track_peak[t];
       meter[t] = m > meter[t] ? m : (uint16_t)(meter[t] * 15 / 16);
+    }
+    for (int i = 0; i < 2; i++) {
+      uint16_t m = i ? pr.verb_peak : pr.delay_peak;
+      space_meter[i] = m > space_meter[i] ? m : (uint16_t)(space_meter[i] * 15 / 16);
     }
     uint16_t mp = (uint16_t)pr.peak;
     meter[TRACKS] = mp > meter[TRACKS] ? mp : (uint16_t)(meter[TRACKS] * 15 / 16);
@@ -1242,7 +2087,10 @@ struct clatter12 : panel_t {
     log_line(now);
 
     int page = get_scroll_page();
+    // what is held lasts only while a finger is on it: worked out afresh every frame
+    memset(&held, 0, sizeof(held));
     if (page == -1) {
+      perf_apply();
       draw_perf_page();
       return;
     }
@@ -1253,37 +2101,55 @@ struct clatter12 : panel_t {
     }
     oy = page * 16;
     if (page == PAGE_SAVE) {
+      repeat_background();
+      perf_apply();
       leds_clear();
       save_page.saveload(16, true, FLAG_PICKER_ENABLE_DELETE);
       return;
     }
     // touches of a page that is no longer shown are finished
     if (page != PAGE_SEQ)
-      for (int t = 0; t < TRACKS; ++t)
+      for (int t = 0; t < TRACKS; t++)
         for (int x = 0; x < STEPS; ++x) press[t][x].active = 0;
-    switch (page) {
-    case PAGE_SEQ:
-      seq_steps(now);
-      seq_editor(now);
-      seq_tracks(now);
-      seq_controls(now);
-      break;
-    case PAGE_SOUND: sound_page(now, false); break;
-    case PAGE_GEN: gen_page(now, false); break;
-    case PAGE_MIX: mix_page(now, false); break;
-    case PAGE_FX: fx_page(now, false); break;
+    tempo_pad(now);
+    if (tempo_overlay) {
+      tempo_overlay_touch(now);
+    } else {
+      switch (page) {
+      case PAGE_SEQ:
+        seq_steps(now);
+        seq_editor(now);
+        seq_tracks(now);
+        seq_controls(now);
+        break;
+      case PAGE_SOUND: sound_page(now, false); break;
+      case PAGE_GEN: gen_page(now, false); break;
+      case PAGE_MIX: mix_page(now, false); break;
+      case PAGE_FX: fx_page(now, false); break;
+      case PAGE_PERF: perform_page(now, false); break;
+      case PAGE_REPEAT: repeat_page(now, false); break;
+      }
     }
+    if (page != PAGE_REPEAT || tempo_overlay) repeat_background();
+    perf_apply();
+    scene_service();
     nav_and_transport(page);
     if (get_scroll_page() != page) return; // moved: the next frame draws the new page
     leds_clear();
-    switch (page) {
-    case PAGE_SEQ: draw_seq(now); break;
-    case PAGE_SOUND: sound_page(now, true); break;
-    case PAGE_GEN: gen_page(now, true); break;
-    case PAGE_MIX: mix_page(now, true); break;
-    case PAGE_FX: fx_page(now, true); break;
+    if (tempo_overlay) {
+      draw_tempo_overlay(now);
+    } else {
+      switch (page) {
+      case PAGE_SEQ: draw_seq(now); break;
+      case PAGE_SOUND: sound_page(now, true); break;
+      case PAGE_GEN: gen_page(now, true); break;
+      case PAGE_MIX: mix_page(now, true); break;
+      case PAGE_FX: fx_page(now, true); break;
+      case PAGE_PERF: perform_page(now, true); break;
+      case PAGE_REPEAT: repeat_page(now, true); break;
+      }
     }
-    draw_nav(page);
+    draw_nav(page, now);
   }
 
 };

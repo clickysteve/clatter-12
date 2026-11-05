@@ -6,7 +6,7 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
 
 - 0.0.1-exp: LXR engine in one panel file; 44.14 → 32 kHz conversion; 16-step grid with pressure velocity;
   GEN / MUT / KIT / STYLE / UNDO / CLR; Plinky transport and tempo; DSP load page and log; first emulator run.
-- This version (docs/DESIGN.md):
+- 0.0.2-exp (docs/DESIGN.md):
   - [x] Pages on Plinky's convention: SEQ, SOUND, GEN, MIX, FX, SAVE; row 15 the same on all.
   - [x] Variation lanes removed; tap on / tap off / hold to select and edit; several held steps edited together.
   - [x] Conditions on steps (Pocket's: 1:2 … 4:4, 25/50/75 %), counted over whole passes.
@@ -24,6 +24,23 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
   - [x] Cortex-M33 build fixed for GCC 13 (`_sram` section conflict); sizes now include the panel.
   - [x] CPU estimate in QEMU's Cortex-M33 model (`make m33-bench`).
   - [x] The project page runs the panel itself (WebAssembly).
+- 0.0.3-exp, performance and musicality (docs/DESIGN.md, docs/AUDIT.md):
+  - [x] Audit of every page and control, and of the delay and reverb path (sends went only to Plinky's
+        effects; nothing set them; the web demo's sends were silent).
+  - [x] CLATTER 12's own delay (12 tempo divisions, feedback, filter, wet, ping-pong, freeze) and reverb
+        (size, decay, damping, wet, freeze) on the FX page's SPACE bank; FX ENGINE switch to Plinky's.
+  - [x] TEMPO on row 15 of every page: tap tempo; held, an overlay with the BPM, ±1/5/10, half and
+        double time, presets, nudge, a tap row. One clock: Plinky's.
+  - [x] Ratchets: tempo-synchronised 2-8 strokes, never closer than 12 ms; seven velocity curves.
+  - [x] Rolls apart from ratchets: flam and drag (graces played ahead of the step), double and triple
+        strokes, accelerating and decelerating rolls. Auditioned on edit.
+  - [x] PERFORM: momentary mute, solo, kill groups, fills (CLATTER Web's), temporary mutation, density,
+        stutter, delay and reverb throws, freezes; LATCH, RELEASE, COMMIT (undoable).
+  - [x] REPEAT: note repeat by track with straight/triplet/dotted rates, pressure as velocity, rate or
+        chance, curves; rolls by hand; sequencer-level beat repeat with shape and track mask.
+  - [x] Scenes: eight mixer + FX snapshots, recalled at the next bar (sample-exact for the mixer).
+  - [x] Project version 2 (step layout, FX, REPEAT settings, scenes); version-1 projects convert.
+  - [x] Engine trigger log; 66 engine-level timing tests; 201 panel checks; QEMU scenarios for all of it.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 
@@ -68,8 +85,19 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
 
 ## 7. Effects
 
-- [ ] The LXR's own delay (64 KB half-float memory; PSRAM?) only if CPU allows; Plinky's delay and reverb
-      are used through the sends instead.
+- [ ] Measure CLATTER 12's delay and reverb on the device (PSRAM streams); if too slow, put the reverb's
+      26 KB in SRAM, or run the delay at half rate, or default FX ENGINE to PLINKY.
+- [ ] Plinky's own delay time, feedback and tail on the grid when FX ENGINE is PLINKY (its
+      `MIX_PARAM_*` through the mix preset; signatures to confirm against the published headers).
+- [ ] An audio-buffer stutter (beat repeat of the sound, not the sequence): needs a buffer and CPU.
+
+## 8. Performance
+
+- [ ] MORPH between two kits (evaluated in docs/DESIGN.md; deferred until a device shows headroom):
+      continuous parameters only, rate-limited through the kit pump, per-track enable, pressure.
+- [ ] Pattern and kit banks, so that scenes can change them.
+- [ ] Sub-block timing for strokes and repeats (now the LXR block, 1.45 ms, as Pocket's steps).
+- [ ] Fine tempo below 1 BPM (Pocket's sequencer keeps whole BPM).
 
 ## Before sharing
 

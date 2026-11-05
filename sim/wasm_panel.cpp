@@ -136,6 +136,10 @@ EXPORT("c12p_status") int c12p_status(int what) {
   case 6: return P->sound_bank;
   case 7: return P->hist_undo;
   case 8: return P->hist_redo;
+  case 9: return P->fx_bank;
+  case 10: return P->tempo_overlay;
+  case 11: return P->latch ? 1 : 0;
+  case 12: return P->plinky_fx() ? 1 : 0;
   default: return 0;
   }
 }

@@ -18,6 +18,7 @@
 #include <string.h>
 #include "c12_engine.h"
 #include "c12_resampler.h"
+#include "c12_space.h"
 #include "pocket_lxr.h"
 #include "pocket_seq.h"
 #include "pocket_kit.h"
@@ -75,6 +76,8 @@ static int16_t fxIn[C12_LXR_BLOCK * 2], fxOut[C12_LXR_BLOCK * 2];
 static float fxWet[3];
 static float crushStep, crushInv;
 static uint8_t limiterOn;
+static uint8_t spaceOn = 1; /* the sends feed CLATTER 12's delay and reverb (else Plinky's) */
+static int spaceBpm;
 
 /* sends: built per LXR block, converted to the output rate linearly (they feed a reverb and a delay) */
 #define SEND_CAP 512u
@@ -86,22 +89,96 @@ static uint32_t outRate;
 
 /* profile */
 static c12_clock_fn clockFn;
+static inline uint32_t now_us(void) { return clockFn ? clockFn() : 0u; }
 static volatile struct c12_engine_profile prof;
 
-/* ------------------------------------------------------------------ ratchets (audio context) */
+/* ------------------------------------------------------------------ strokes, rolls, performance (audio context) */
+/* Time inside a step is Pocket's: phase units, 20 * bpm a sample, a straight sixteenth 300 * rate
+ * (pocket_seq.c). Strokes of a ratchet or roll are kept in those units from the moment they were
+ * scheduled, so they follow tempo changes, and fire on the first LXR block at or after their time,
+ * as Pocket's steps do (1.45 ms resolution, never accumulating). */
+#define SIXTEENTH (300u * C12_LXR_RATE)
+#define TWELFTH (25u * C12_LXR_RATE)
+#define MAX_STROKES 12
+#define CLOSED_HAT_T 5
+#define OPEN_HAT_T 6
+
 static const uint8_t ratchetStrokes[C12_RATCHETS] = { 1, 2, 3, 4, 6, 8 };
 unsigned c12_ratchet_strokes(unsigned ratchet) { return ratchet < C12_RATCHETS ? ratchetStrokes[ratchet] : 1u; }
 
-struct roll {
-	uint8_t n, next, velocity, note, variation, ramp;
-	uint32_t elapsed;      /* Pocket's phase units since the step (sample_rate * 20 a sample) */
-	uint32_t due[8];       /* of each stroke */
-	uint32_t seed;
+static const uint8_t divTwelfths[C12_DIVS] = { 0, 192, 96, 48, 24, 12, 6, 3, 32, 16, 8, 4, 36, 18 };
+unsigned c12_div_twelfths(unsigned div) { return div < C12_DIVS ? divTwelfths[div] : 0u; }
+
+uint32_t c12_cell_from_v1(uint32_t cell)
+{
+	static const uint8_t rampCurve[4] = { C12_CURVE_FADE_OUT, C12_CURVE_FADE_IN, C12_CURVE_FADE_OUT, C12_CURVE_HUMAN };
+	const unsigned n = cell >> 20 & 7u, spacing = cell >> 23 & 3u, ramp = cell >> 25 & 3u;
+	if (!n || n >= C12_RATCHETS) return cell & 0xfffffu;
+	const unsigned roll = spacing == 1u ? C12_ROLL_ACCEL : spacing == 2u ? C12_ROLL_DECEL : C12_ROLL_NONE;
+	return C12_CELL_WITH_EXT(cell & 0xfffffu, n, rampCurve[ramp], roll);
+}
+
+int c12_curve_velocity(unsigned curve, int v, unsigned k, unsigned n, uint32_t u)
+{
+	const float t = n > 1 ? (float)k / (float)(n - 1) : 0.f;
+	float out = (float)v;
+	switch (curve)
+	{
+	case C12_CURVE_FADE_IN: out *= 0.35f + 0.65f * t; break;
+	case C12_CURVE_FADE_OUT: out *= 1.f - 0.6f * t; break;
+	case C12_CURVE_ACCENT_FIRST: if (k) out *= 0.6f; break;
+	case C12_CURVE_ACCENT_LAST: if (k + 1u < n) out *= 0.6f; break;
+	case C12_CURVE_ALTERNATE: if (k & 1u) out *= 0.6f; break;
+	/* CLATTER's roll shape (destruction/rolls.ts shapeVel 'human') */
+	case C12_CURVE_HUMAN: out *= 0.45f + 0.3f * (float)(u >> 16 & 255u) / 255.f + 0.15f * t; break;
+	default: break;
+	}
+	const int r = (int)(out + 0.5f);
+	return r < 8 ? 8 : r > 127 ? 127 : r;
+}
+
+struct strokes {
+	uint8_t n, next, note, variation, manual;
+	uint8_t vel[MAX_STROKES];
+	uint32_t due[MAX_STROKES]; /* phase units after the moment they were scheduled */
+	uint32_t elapsed;
 };
-static struct roll rolls[C12_TRACKS];
-/* what the sequencer emitted in this block, for its ratchets */
+static struct strokes strk[C12_TRACKS];  /* a step's (or a hand-played) ratchet or roll */
+static struct strokes grace[C12_TRACKS]; /* grace notes ahead of the next step */
+static uint32_t graceFor[C12_TRACKS];    /* the step count (pocket_seq_steps_played) they lead into */
+
+/* what the sequencer emitted in this block (all of it: mute and solo are applied as voices are
+   triggered, after the performance has had its say) */
 static uint8_t emitted[C12_TRACKS][4];
 static uint8_t emittedCount;
+
+/* control -> audio: performance (single bytes and one pointer) */
+static volatile uint8_t pfThrowD, pfThrowR, pfFreezeD, pfFreezeR, pfFill, pfAltMask;
+static volatile int8_t pfDensity;
+static const uint32_t* volatile pfAlt;
+static volatile uint8_t brDivReq, brMaskReq, brShapeReq;
+static volatile uint8_t nrDiv[C12_TRACKS], nrVel[C12_TRACKS], nrChance[C12_TRACKS], nrCurve[C12_TRACKS];
+static volatile uint32_t playCell[C12_TRACKS], playSeq[C12_TRACKS];
+/* scenes */
+static struct c12_mix_state stage;
+static volatile uint8_t stagePending, stageAtBar;
+
+/* audio only */
+static uint64_t musNow, musStepStart, gridOrigin; /* musical time: phase units of straight sixteenths */
+static uint32_t stepElapsed, stepLen = SIXTEENTH, musFrac;
+static float stepRatio = 1.f;
+static uint8_t wasRunning;
+static uint32_t playSeen[C12_TRACKS];
+static uint8_t playWaiting[C12_TRACKS];
+/* beat repeat */
+static uint8_t brNow, brPending, brOn, brP0, brCount, brPass, brMask, brShape;
+static uint32_t brW, brR, brRep;
+static uint64_t brLast;
+/* note repeat */
+static uint8_t nrNow[C12_TRACKS];
+static uint16_t nrK[C12_TRACKS];
+static uint64_t nrDue[C12_TRACKS];
+static uint32_t nrI[C12_TRACKS], nrBeat[C12_TRACKS];
 
 static int audible(int track)
 {
@@ -110,18 +187,39 @@ static int audible(int track)
 	return !mixSolo || (mixSolo & bit);
 }
 
+/* the trigger log (c12_engine_trigger_log) */
+static struct c12_trigger_event trigLog[C12_TRIG_LOG];
+static volatile uint32_t trigCount, blockCount;
+static uint8_t trigKind;
+
 static void trigger_now(int track, int velocity, int note, int variation)
 {
+	if (!audible(track)) return;
 	if (track >= POCKET_TRIG_CLOSED_HAT) hatOwner = (uint8_t)track;
 	pocket_lxr_trigger_now(track, velocity, note, variation);
+	struct c12_trigger_event* e = &trigLog[trigCount % C12_TRIG_LOG];
+	e->block = blockCount;
+	e->track = (uint8_t)track;
+	e->velocity = (uint8_t)velocity;
+	e->kind = trigKind;
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	trigCount++;
 }
 
+unsigned c12_engine_trigger_log(struct c12_trigger_event* out)
+{
+	const uint32_t n = trigCount;
+	const unsigned m = n < C12_TRIG_LOG ? n : C12_TRIG_LOG;
+	for (unsigned i = 0; i < m; i++) out[i] = trigLog[(n - m + i) % C12_TRIG_LOG];
+	return m;
+}
+uint32_t c12_engine_block_count(void) { return blockCount; }
+
 /* The sequencer's emit, inside pocket_seq_block: noted, and played by block_hook as soon as the
- * step is known (the same block, so the same moment), with its ratchet. Mute and solo hold a track
- * back here, before it reaches its voice, so a muted closed hat does not choke an open one. */
+ * step is known (the same block, so the same moment), with its ratchet. */
 static void seq_emit(int track, int velocity, int note, int variation)
 {
-	if (!audible(track) || emittedCount >= C12_TRACKS) return;
+	if (emittedCount >= C12_TRACKS) return;
 	uint8_t* e = emitted[emittedCount++];
 	e[0] = (uint8_t)track;
 	e[1] = (uint8_t)velocity;
@@ -129,114 +227,607 @@ static void seq_emit(int track, int velocity, int note, int variation)
 	e[3] = (uint8_t)variation;
 }
 
-/* x in 0..256 (Q8) along the step -> where the stroke falls, Q8 */
-static uint32_t roll_place(unsigned shape, uint32_t x, uint32_t gap, uint32_t u)
+static inline int cell_note(uint32_t cell) { return POCKET_CELL_NOTE(cell) ? (int)POCKET_CELL_NOTE(cell) : POCKET_SEQ_NOTE_PROGRAMMED; }
+
+/* Pocket's condition table (pocket_seq.c): which of 12 passes a condition sounds on */
+static const uint16_t condPasses[POCKET_CONDITION_25] = { 0xfff, 0x555, 0xaaa, 0x249, 0x492, 0x924, 0x111, 0x222, 0x444, 0x888 };
+/* 1 sounds, 0 does not, -1 chance (unknown ahead of time) */
+static int cell_predict(uint32_t cell, unsigned pass)
 {
-	switch (shape)
+	if (!POCKET_CELL_VELOCITY(cell)) return 0;
+	const unsigned c = POCKET_CELL_CONDITION(cell);
+	if (c < POCKET_CONDITION_25) return (int)(condPasses[c] >> pass & 1u);
+	return -1;
+}
+static int cell_sounds(uint32_t cell, unsigned pass, uint32_t u)
+{
+	const int p = cell_predict(cell, pass);
+	if (p >= 0) return p;
+	return (u >> 24) < (POCKET_CELL_CONDITION(cell) - POCKET_CONDITION_25 + 1u) * 64u;
+}
+
+static uint32_t phase_per_sample(void) { return 20u * (uint32_t)pocket_seq_tempo(); }
+static uint32_t ms_phase(unsigned ms) { return (uint32_t)(ms * C12_LXR_RATE / 1000u) * phase_per_sample(); }
+/* a flam's grace leads its hit by a 64th note (CLATTER's FLAM_TICKS), 15-35 ms; a drag's two by a 128th each, 10-20 ms */
+static uint32_t grace_gap(unsigned roll)
+{
+	const uint32_t q = SIXTEENTH / (roll == C12_ROLL_FLAM ? 4u : 8u);
+	const uint32_t lo = ms_phase(roll == C12_ROLL_FLAM ? 15u : 10u), hi = ms_phase(roll == C12_ROLL_FLAM ? 35u : 20u);
+	return q < lo ? lo : q > hi ? hi : q;
+}
+static uint32_t grace_lead(unsigned roll) { return roll == C12_ROLL_DRAG ? 2u * grace_gap(roll) : grace_gap(roll); }
+
+static void strokes_add(struct strokes* s, uint32_t due, int vel)
+{
+	if (s->n >= MAX_STROKES) return;
+	s->due[s->n] = due;
+	s->vel[s->n] = (uint8_t)(vel < 8 ? 8 : vel > 127 ? 127 : vel);
+	s->n++;
+}
+
+/* A step's (or a hand-played cell's) strokes: its ratchet, its roll, its graces if they were not
+ * played ahead. `len` is the step's length in phase units. */
+static void schedule(int t, uint32_t cell, int v, int note, int variation, uint32_t len, int graced, uint32_t seed, int manual)
+{
+	struct strokes* s = &strk[t];
+	const unsigned roll = C12_CELL_ROLL(cell), curve = C12_CELL_CURVE(cell);
+	unsigned n = c12_ratchet_strokes(C12_CELL_RATCHET(cell));
+	const uint32_t minGap = ms_phase(C12_MIN_STROKE_MS);
+	s->n = s->next = 0;
+	s->elapsed = 0;
+	s->note = (uint8_t)note;
+	s->variation = (uint8_t)variation;
+	s->manual = (uint8_t)manual;
+	uint32_t start = 0;
+	if ((roll == C12_ROLL_FLAM || roll == C12_ROLL_DRAG) && !graced)
 	{
-	case C12_ROLL_ACCEL: return 256u - ((256u - x) * (256u - x) >> 8); /* the gaps shrink */
-	case C12_ROLL_DECEL: return x * x >> 8;                           /* the gaps grow */
-	case C12_ROLL_RANDOM:
-	{
-		/* each stroke up to a quarter of a gap early or late, the same on the same pass */
-		const int32_t j = (int32_t)((u >> 8 & 255u) - 128u) * (int32_t)gap / 512;
-		const int32_t p = (int32_t)x + j;
-		return (uint32_t)(p < 1 ? 1 : p > 255 ? 255 : p);
+		/* not played ahead (first step, a chance condition, a hand-played roll): now, the hit after */
+		const uint32_t g = grace_gap(roll);
+		if (roll == C12_ROLL_DRAG)
+		{
+			strokes_add(s, 0, v * 45 / 100);
+			strokes_add(s, g, v * 50 / 100);
+			start = 2u * g;
+		}
+		else
+		{
+			strokes_add(s, 0, v * 55 / 100);
+			start = g;
+		}
 	}
-	default: return x;
+	switch (roll)
+	{
+	case C12_ROLL_DOUBLE:
+		strokes_add(s, start, v);
+		strokes_add(s, start + len / 2u, v * 82 / 100);
+		break;
+	case C12_ROLL_TRIPLE:
+		strokes_add(s, start, v);
+		strokes_add(s, start + len / 3u, v * 72 / 100);
+		strokes_add(s, start + 2u * (len / 3u), v * 86 / 100);
+		break;
+	case C12_ROLL_ACCEL:
+	case C12_ROLL_DECEL:
+	{
+		/* over two sixteenths (the pair's length whatever the swing): gaps closing or opening */
+		const uint32_t span = 2u * SIXTEENTH;
+		const unsigned m = n >= 3u ? n : 6u;
+		uint32_t last = 0;
+		for (unsigned k = 0; k < m; k++)
+		{
+			const float x = (float)k / (float)m;
+			const float p = roll == C12_ROLL_ACCEL ? 1.f - (1.f - x) * (1.f - x) : x * x;
+			uint32_t at = (uint32_t)((float)span * p);
+			if (k && at < last + minGap) at = last + minGap;
+			if (k && at >= span) break;
+			last = at;
+			const float tt = (float)k / (float)(m - 1u);
+			int sv;
+			if (curve != C12_CURVE_FLAT) sv = c12_curve_velocity(curve, v, k, m, pocket_gen_mix(seed, k));
+			else sv = (int)((float)v * (roll == C12_ROLL_ACCEL ? 0.45f + 0.55f * tt : 1.f - 0.6f * tt));
+			strokes_add(s, start + at, sv);
+		}
+		break;
+	}
+	default:
+	{
+		/* a ratchet: n even strokes in the step, fewer if they would come too close */
+		while (n > 1u && len / n < minGap)
+		{
+			n = n == 8u ? 6u : n == 6u ? 4u : n - 1u;
+			st.thinned_strokes++;
+		}
+		for (unsigned k = 0; k < n; k++)
+			strokes_add(s, start + (uint32_t)((uint64_t)len * k / n), c12_curve_velocity(curve, v, k, n, pocket_gen_mix(seed, k)));
+		break;
+	}
 	}
 }
 
-/* rolls.ts shapeVel (crescendo, decrescendo, human) and realize.ts's ratchet (12 % a stroke) */
-static int stroke_velocity(unsigned ramp, int v, unsigned k, unsigned n, uint32_t u)
+/* the strokes due by now; then time moves on a block */
+static void strokes_run(struct strokes* s, int t, uint32_t advance, int count)
 {
-	const float t = n > 1 ? (float)k / (float)(n - 1) : 1.f;
-	float out;
-	switch (ramp)
+	if (!s->n) return;
+	while (s->next < s->n && s->elapsed >= s->due[s->next])
 	{
-	case C12_RAMP_CRESC: out = (float)v * (0.3f + 0.55f * t); break;
-	case C12_RAMP_DECRESC: out = (float)v * (0.85f - 0.5f * t); break;
-	case C12_RAMP_HUMAN: out = (float)v * (0.45f + 0.3f * (float)(u >> 16 & 255u) / 255.f + 0.15f * t); break;
-	default: out = (float)v * (1.f - (float)k * 0.12f); break;
+		const unsigned k = s->next++;
+		if (!audible(t)) continue;
+		trigKind = count == 2 ? C12_TRIG_GRACE : s->manual == 1 ? C12_TRIG_HAND : s->manual == 2 ? C12_TRIG_REPEAT : k ? C12_TRIG_STROKE : C12_TRIG_STEP;
+		trigger_now(t, s->vel[k], s->note, s->variation);
+		if (count && k) st.strokes++;
+		if (count == 2) st.graces++;
 	}
-	int r = (int)(out + 0.5f);
-	return r < 8 ? 8 : r > 127 ? 127 : r;
+	if (s->next >= s->n) s->n = 0;
+	else s->elapsed += advance;
 }
 
-/* the step's first stroke, now, and the rest of its ratchet scheduled */
-static void play_step(int track, int step, const uint8_t* e, uint32_t cell)
+/* ---- FILL and DENSITY (pure: the panel's COMMIT calls it too) ---- */
+/* DOWNBEAT's DENSITY_WEIGHT by velocity level, as CLATTER (rhythm/realize.ts): soft hits go first */
+static const float densityWeight[5] = { 1.6f, 1.3f, 1.0f, 0.7f, 0.4f };
+uint32_t c12_perf_cell(int t, int s, unsigned pass, uint32_t base, int bar_hits, unsigned fill_mask, int density)
 {
-	const unsigned n = c12_ratchet_strokes(C12_CELL_RATCHET(cell));
-	struct roll* r = &rolls[track];
-	r->n = 0;
-	if (n < 2)
+	const uint32_t h = pocket_gen_mix(pocket_gen_mix(0x9e11u + (uint32_t)t, (uint32_t)s), pass);
+	const float u = (float)(h >> 8 & 0xffffu) * (1.f / 65536.f);
+	const unsigned b = (unsigned)s & 15u;
+	const unsigned v = POCKET_CELL_VELOCITY(base);
+	if (v)
 	{
-		trigger_now(track, e[1], e[2], e[3]);
-		return;
+		if (density < 0)
+		{
+			const float dens = 1.f + (float)density * 0.01f;
+			const unsigned level = v * 5u / 128u;
+			if (!(dens > 0.f && u < powf(dens, densityWeight[level > 4u ? 4u : level]))) return 0;
+		}
+		return base;
 	}
-	const unsigned swing = (unsigned)pocket_seq_swing();
-	/* Pocket's step length in its phase units: 6 * rate * (swing or 100 - swing) */
-	const uint32_t length = 6u * C12_LXR_RATE * (step & 1 ? 100u - swing : swing);
-	const unsigned shape = C12_CELL_ROLL(cell);
-	r->seed = pocket_gen_mix(pocket_gen_mix(0xc12u + (uint32_t)track, (uint32_t)step), pocket_seq_pass());
-	const uint32_t gap = 256u / n;
-	for (unsigned k = 1; k < n; k++)
+	const uint32_t h2 = pocket_gen_mix(h, 0xf111u);
+	const float u2 = (float)(h2 >> 8 & 0xffffu) * (1.f / 65536.f), u3 = (float)(h2 >> 24) * (1.f / 256.f);
+	if (fill_mask >> t & 1u)
 	{
-		const uint32_t u = pocket_gen_mix(r->seed, k);
-		const uint32_t q8 = roll_place(shape, k * 256u / n, gap, u);
-		r->due[k] = (uint32_t)((uint64_t)length * q8 >> 8);
+		/* CLATTER's fill: into the gaps, more and louder towards the bar's end */
+		const float k = (float)b / 15.f;
+		if (u2 >= 0.25f + 0.75f * k) return 0;
+		const int fv = (int)(40.f + u3 * 45.f + k * 25.f);
+		const unsigned rat = b >= 14u && (h2 & 1u) ? (b == 15u ? C12_RATCHET_3 : C12_RATCHET_2) : C12_RATCHET_1;
+		return C12_CELL_WITH_EXT(POCKET_CELL(fv > 127 ? 127 : fv, 0u), rat, rat ? C12_CURVE_FADE_IN : C12_CURVE_FLAT, C12_ROLL_NONE);
 	}
-	r->velocity = e[1];
-	r->note = e[2];
-	r->variation = e[3];
-	r->ramp = (uint8_t)C12_CELL_RAMP(cell);
-	r->elapsed = 0;
-	r->next = 1;
-	r->n = (uint8_t)n;
-	trigger_now(track, stroke_velocity(r->ramp, r->velocity, 0, n, pocket_gen_mix(r->seed, 0)), r->note, r->variation);
+	if (density > 0 && bar_hits)
+	{
+		/* ghost notes, most on the sixteenths between the eighths, fewest on the beat */
+		const float w = (b & 1u) ? 1.f : (b & 3u) ? 0.6f : 0.3f;
+		if (u2 < (float)density * 0.01f * w * 0.7f) return POCKET_CELL((unsigned)(30.f + u3 * 30.f), 0u);
+	}
+	return 0;
 }
 
-static void run_rolls(void)
+static int bar_has_hits(const struct pocket_pattern* p, int t, int step)
 {
-	const uint32_t advance = 20u * C12_LXR_BLOCK * (uint32_t)pocket_seq_tempo();
+	const int b0 = step & ~15;
+	for (int i = 0; i < 16; i++)
+		if (POCKET_CELL_VELOCITY(p->cell[t][b0 + i])) return 1;
+	return 0;
+}
+
+static inline uint32_t track_cell(const struct pocket_pattern* p, int t, int step)
+{
+	const uint32_t* alt = pfAlt;
+	return alt && (pfAltMask >> t & 1u) ? alt[t * POCKET_SEQ_MAX_STEPS + step] : p->cell[t][step];
+}
+
+static void play_cell(int t, uint32_t cell, int velocity, uint32_t seed, int graced, int manual)
+{
+	schedule(t, cell, velocity, cell_note(cell), (int)POCKET_CELL_VARIATION(cell), stepLen, graced, seed, manual);
+	strokes_run(&strk[t], t, 0, 1);
+}
+
+/* a new step: what each track plays, through the performance, and their ratchets and rolls */
+static void play_step(int step)
+{
+	const struct pocket_pattern* p = pocket_seq_pattern();
+	const unsigned pass = pocket_seq_pass();
+	const uint32_t played = pocket_seq_steps_played();
+	uint32_t hit[C12_TRACKS];
+	for (int t = 0; t < C12_TRACKS; t++) hit[t] = 0;
+	for (unsigned i = 0; i < emittedCount; i++) hit[emitted[i][0]] = p->cell[emitted[i][0]][step];
+	const unsigned fill = pfFill, altMask = pfAlt ? pfAltMask : 0u;
+	const int density = pfDensity;
+	int changed = 0;
 	for (int t = 0; t < C12_TRACKS; t++)
 	{
-		struct roll* r = &rolls[t];
-		if (!r->n) continue;
-		if (!pocket_seq_playing()) { r->n = 0; continue; }
-		r->elapsed += advance;
-		while (r->next < r->n && r->elapsed >= r->due[r->next])
+		if (brOn && (brMask >> t & 1u)) { hit[t] = 0; continue; }
+		uint32_t c = hit[t];
+		if (altMask >> t & 1u)
 		{
-			const unsigned k = r->next++;
-			if (audible(t))
-			{
-				trigger_now(t, stroke_velocity(r->ramp, r->velocity, k, r->n, pocket_gen_mix(r->seed, k)), r->note, r->variation);
-				st.strokes++;
-			}
+			const uint32_t a = track_cell(p, t, step);
+			c = cell_sounds(a, pass, pocket_gen_mix(0xa17u + (uint32_t)t, played)) ? a : 0u;
 		}
-		if (r->next >= r->n) r->n = 0;
+		if (fill || density)
+		{
+			const uint32_t before = c;
+			c = c12_perf_cell(t, step, pass, c, density > 0 ? bar_has_hits(p, t, step) : 0, fill, density);
+			if (!before && c) st.added++;
+			if (before && !c) st.dropped++;
+		}
+		changed |= c != hit[t];
+		hit[t] = c;
+	}
+	/* the hats are one voice: an open hat that sounds takes it (Pocket's rule, kept for what the
+	   performance added) */
+	if (changed && hit[OPEN_HAT_T]) hit[CLOSED_HAT_T] = 0;
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		if (!hit[t]) continue;
+		const uint32_t seed = pocket_gen_mix(pocket_gen_mix(0xc12u + (uint32_t)t, (uint32_t)step), pass);
+		play_cell(t, hit[t], (int)POCKET_CELL_VELOCITY(hit[t]), seed, graceFor[t] == played, 0);
 	}
 }
 
-/* Pocket's block hook: its sequencer, then the strokes of ratchets due in this block. */
+/* flams and drags: their graces go out before the step, while this one is still playing */
+static void graces_ahead(uint32_t advance)
+{
+	const struct pocket_pattern* p = pocket_seq_pattern();
+	const int pos = pocket_seq_position();
+	if (pos == POCKET_SEQ_NOT_PLAYING) return;
+	const uint32_t played = pocket_seq_steps_played();
+	const int steps = (int)POCKET_PATTERN_STEPS(p);
+	int next = pos + 1;
+	unsigned pass = pocket_seq_pass();
+	if (next >= steps) { next = 0; pass = pass == 11u ? 0u : pass + 1u; }
+	const uint32_t remaining = stepLen > stepElapsed ? stepLen - stepElapsed : 0u;
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		if (graceFor[t] == played + 1u || (brOn && (brMask >> t & 1u)) || grace[t].n) continue;
+		const uint32_t c = track_cell(p, t, next);
+		const unsigned roll = C12_CELL_ROLL(c);
+		if (roll != C12_ROLL_FLAM && roll != C12_ROLL_DRAG) continue;
+		if (cell_predict(c, pass) != 1) continue;
+		if (pfDensity < 0 && !c12_perf_cell(t, next, pass, c, 1, 0u, pfDensity)) continue;
+		const uint32_t lead = grace_lead(roll);
+		if (remaining > lead + advance) continue; /* a later block */
+		const int v = (int)POCKET_CELL_VELOCITY(c);
+		struct strokes* g = &grace[t];
+		g->n = g->next = 0;
+		g->elapsed = 0;
+		g->note = (uint8_t)cell_note(c);
+		g->variation = (uint8_t)POCKET_CELL_VARIATION(c);
+		g->manual = 0;
+		const uint32_t first = remaining > lead ? remaining - lead : 0u;
+		if (roll == C12_ROLL_DRAG)
+		{
+			strokes_add(g, first, v * 45 / 100);
+			strokes_add(g, first + grace_gap(roll), v * 50 / 100);
+		}
+		else
+			strokes_add(g, first, v * 55 / 100);
+		graceFor[t] = played + 1u;
+	}
+}
+
+/* ---- the musical clock: where the sequence is, in straight sixteenths, swing followed ---- */
+static void clock_update(int running, int newStep, uint32_t advance)
+{
+	if (running && newStep)
+	{
+		const int step = pocket_seq_position();
+		const unsigned swing = (unsigned)pocket_seq_swing();
+		if (wasRunning) musStepStart += SIXTEENTH;
+		else
+		{
+			/* PLAY: the grid starts here; note repeats held through it take it up */
+			musStepStart = musNow;
+			gridOrigin = musNow;
+			for (int t = 0; t < C12_TRACKS; t++)
+				if (nrNow[t]) { nrDue[t] = musNow; nrBeat[t] = 0; }
+		}
+		musNow = musStepStart;
+		musFrac = 0;
+		stepElapsed = 0;
+		/* Pocket's step length in its phase units: 6 * rate * (swing or 100 - swing) */
+		stepLen = 6u * C12_LXR_RATE * (step & 1 ? 100u - swing : swing);
+		stepRatio = (float)SIXTEENTH / (float)stepLen;
+	}
+	else if (running)
+	{
+		stepElapsed += advance;
+		float f = (float)stepElapsed * stepRatio;
+		const uint32_t frac = f >= (float)(SIXTEENTH - 1u) ? SIXTEENTH - 1u : (uint32_t)f;
+		musNow = musStepStart + frac;
+		musFrac = frac;
+	}
+	else
+	{
+		musNow += advance;
+		stepLen = SIXTEENTH;
+		stepRatio = 1.f;
+	}
+	wasRunning = (uint8_t)running;
+}
+
+/* ---- beat repeat ---- */
+static void repeat_fire(int j)
+{
+	const struct pocket_pattern* p = pocket_seq_pattern();
+	const int steps = (int)POCKET_PATTERN_STEPS(p);
+	const int step = (brP0 + j) % steps;
+	float g = 1.f;
+	if (brShape == 1) { g = 1.f - 0.18f * (float)brRep; if (g < 0.25f) g = 0.25f; }
+	else if (brShape == 2) { g = 0.4f + 0.15f * (float)brRep; if (g > 1.f) g = 1.f; }
+	uint32_t hit[C12_TRACKS];
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		hit[t] = 0;
+		if (!(brMask >> t & 1u)) continue;
+		const uint32_t c = track_cell(p, t, step);
+		if (cell_sounds(c, brPass, pocket_gen_mix(0xb7u + (uint32_t)t, (uint32_t)step))) hit[t] = c;
+	}
+	if (hit[OPEN_HAT_T]) hit[CLOSED_HAT_T] = 0;
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		if (!hit[t]) continue;
+		int v = (int)((float)POCKET_CELL_VELOCITY(hit[t]) * g + 0.5f);
+		if (v < 8) v = 8;
+		play_cell(t, hit[t], v, pocket_gen_mix(0xbe7u + (uint32_t)step, brRep), 0, 2);
+		st.repeats++;
+	}
+}
+/* fire the captured steps whose offsets fall in (lo, hi] of the window */
+static void repeat_range(int64_t lo, int64_t hi)
+{
+	for (unsigned j = 0; j < brCount; j++)
+	{
+		const int64_t o = (int64_t)j * SIXTEENTH;
+		if (o > lo && o <= hi) repeat_fire((int)j);
+	}
+}
+static void repeat_anchor(int fireNow)
+{
+	brOn = 1;
+	brPending = 0;
+	brP0 = (uint8_t)pocket_seq_position();
+	brPass = (uint8_t)pocket_seq_pass();
+	brRep = 0;
+	brMask = brMaskReq;
+	brShape = brShapeReq;
+	brCount = (uint8_t)(brW >= SIXTEENTH ? (brW + SIXTEENTH - 1u) / SIXTEENTH : 1u);
+	if (brCount > 16) brCount = 16;
+	brLast = musNow;
+	if (fireNow)
+	{
+		brR = 0;
+		repeat_range(-1, 0);
+	}
+	else
+		brR = musFrac; /* this step already sounded: the window goes on from here */
+}
+static void repeat_update(int running, int newStep)
+{
+	const unsigned want = running ? brDivReq : 0u;
+	if (want != brNow)
+	{
+		brNow = (uint8_t)want;
+		brOn = brPending = 0;
+		if (want)
+		{
+			brW = c12_div_twelfths(want) * TWELFTH;
+			if (newStep) repeat_anchor(1);
+			else if (musFrac < SIXTEENTH / 2u) repeat_anchor(0);
+			else brPending = 1; /* the step is half gone: from the next */
+		}
+		return;
+	}
+	if (!brNow) return;
+	if (brPending)
+	{
+		if (newStep) repeat_anchor(1);
+		return;
+	}
+	brMask = brMaskReq;
+	brShape = brShapeReq;
+	const uint32_t d = (uint32_t)(musNow - brLast);
+	brLast = musNow;
+	int64_t lo = brR;
+	brR += d;
+	while (brR >= brW)
+	{
+		repeat_range(lo, (int64_t)brW - 1);
+		brR -= brW;
+		brRep++;
+		lo = -1;
+	}
+	repeat_range(lo, brR);
+}
+
+/* ---- note repeat ---- */
+static void note_repeat_fire(int t)
+{
+	const unsigned k = nrK[t]++;
+	const uint32_t u = pocket_gen_mix(0x4e7u + (uint32_t)t, k);
+	if ((u >> 24) * 100u >= (uint32_t)nrChance[t] * 256u) return;
+	float v = (float)nrVel[t];
+	const float kk = (float)(k > 7u ? 7u : k) / 7.f;
+	switch (nrCurve[t])
+	{
+	case C12_CURVE_FADE_IN: v *= 0.35f + 0.65f * kk; break;
+	case C12_CURVE_FADE_OUT: v *= 1.f - 0.6f * kk; break;
+	case C12_CURVE_ACCENT_FIRST: if (k) v *= 0.6f; break;
+	case C12_CURVE_ACCENT_LAST: if (nrBeat[t]) v *= 0.6f; break; /* held: each beat accented */
+	case C12_CURVE_ALTERNATE: if (k & 1u) v *= 0.6f; break;
+	case C12_CURVE_HUMAN: v *= 0.7f + 0.3f * (float)(u >> 8 & 255u) / 255.f; break;
+	default: break;
+	}
+	int iv = (int)(v + 0.5f);
+	trigKind = C12_TRIG_REPEAT;
+	trigger_now(t, iv < 8 ? 8 : iv > 127 ? 127 : iv, POCKET_SEQ_NOTE_PROGRAMMED, 0);
+	st.repeats++;
+}
+static void note_repeat_update(int running)
+{
+	const uint32_t minI = ms_phase(10u);
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		const unsigned want = nrDiv[t] < C12_DIVS ? nrDiv[t] : 0u;
+		if (want != nrNow[t])
+		{
+			const int starting = !nrNow[t];
+			nrNow[t] = (uint8_t)want;
+			if (!want) continue;
+			uint32_t I = c12_div_twelfths(want) * TWELFTH;
+			while (I < minI) I *= 2u;
+			nrI[t] = I;
+			if (starting) { nrK[t] = 0; note_repeat_fire(t); }
+			/* the next strike on the grid (from PLAY; from now when stopped) */
+			if (running)
+			{
+				const uint64_t rel = musNow - gridOrigin;
+				nrDue[t] = gridOrigin + (rel / I + 1u) * I;
+				if (starting && nrDue[t] - musNow < I / 2u) nrDue[t] += I;
+				nrBeat[t] = (uint32_t)((nrDue[t] - gridOrigin) % (4u * SIXTEENTH));
+			}
+			else
+			{
+				nrDue[t] = musNow + I;
+				nrBeat[t] = I % (4u * SIXTEENTH);
+			}
+		}
+		if (!nrNow[t]) continue;
+		for (int guard = 0; guard < 4 && musNow >= nrDue[t]; guard++)
+		{
+			note_repeat_fire(t);
+			nrDue[t] += nrI[t];
+			nrBeat[t] += nrI[t];
+			while (nrBeat[t] >= 4u * SIXTEENTH) nrBeat[t] -= 4u * SIXTEENTH;
+		}
+	}
+}
+
+static void stage_apply(void)
+{
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		mixLevel[t] = stage.level[t];
+		mixDelay[t] = stage.delay[t];
+		mixReverb[t] = stage.reverb[t];
+	}
+	mixMute = stage.mute;
+	mixSolo = stage.solo;
+	mixRoute = stage.route;
+	mixMaster = stage.master;
+	__atomic_store_n(&stagePending, 0, __ATOMIC_RELEASE);
+}
+
+/* Pocket's block hook: its sequencer, then the performance, the strokes due in this block. */
 static void block_hook(void)
 {
+	blockCount++;
 	const uint32_t before = pocket_seq_steps_played();
 	emittedCount = 0;
 	pocket_seq_block();
-	if (pocket_seq_steps_played() != before)
+	const int pos = pocket_seq_position();
+	const int running = pocket_seq_playing() && pos != POCKET_SEQ_NOT_PLAYING;
+	const int newStep = pocket_seq_steps_played() != before;
+	const uint32_t advance = 20u * C12_LXR_BLOCK * (uint32_t)pocket_seq_tempo();
+	/* a scene: on the first step of a bar, before it sounds */
+	if (__atomic_load_n(&stagePending, __ATOMIC_ACQUIRE) && (!running || !stageAtBar || (newStep && (pos & 15) == 0))) stage_apply();
+	clock_update(running, newStep, advance);
+	repeat_update(running, newStep);
+	if (newStep && running) play_step(pos);
+	if (running) graces_ahead(advance);
+	note_repeat_update(running);
+	/* cells played by hand: at the next step when playing (in time), now when stopped */
+	for (int t = 0; t < C12_TRACKS; t++)
 	{
-		const int step = pocket_seq_position();
-		const struct pocket_pattern* p = pocket_seq_pattern();
-		/* a new step: what it plays, and their ratchets (a track it plays starts its roll again;
-		   other tracks' rolls carry on) */
-		for (unsigned i = 0; i < emittedCount; i++)
+		const uint32_t q = playSeq[t];
+		if (q != playSeen[t]) { playSeen[t] = q; playWaiting[t] = 1; }
+		if (playWaiting[t] && (!running || newStep))
 		{
-			const int t = emitted[i][0];
-			play_step(t, step, emitted[i], p->cell[t][step]);
+			playWaiting[t] = 0;
+			const uint32_t c = playCell[t];
+			play_cell(t, c, (int)POCKET_CELL_VELOCITY(c), pocket_gen_mix(0x9a7u + (uint32_t)t, q), 0, 1);
 		}
 	}
-	run_rolls();
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		if (!running && strk[t].manual != 1) strk[t].n = 0;
+		if (!running) grace[t].n = 0;
+		strokes_run(&grace[t], t, advance, 2);
+		strokes_run(&strk[t], t, advance, 1);
+	}
+}
+
+/* ---- control context ---- */
+void c12_perf_set_throw(unsigned delay_mask, unsigned verb_mask)
+{
+	pfThrowD = (uint8_t)(delay_mask & 0x7fu);
+	pfThrowR = (uint8_t)(verb_mask & 0x7fu);
+}
+void c12_perf_set_freeze(int delay, int verb)
+{
+	if (pfFreezeD == (delay ? 1 : 0) && pfFreezeR == (verb ? 1 : 0)) return;
+	pfFreezeD = delay ? 1 : 0;
+	pfFreezeR = verb ? 1 : 0;
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	fxSerial++;
+}
+void c12_perf_set_fill(unsigned mask) { pfFill = (uint8_t)(mask & 0x7fu); }
+void c12_perf_set_density(int amount) { pfDensity = (int8_t)(amount < -100 ? -100 : amount > 100 ? 100 : amount); }
+void c12_perf_set_alt(const uint32_t* cells, unsigned mask)
+{
+	if (!cells || !mask)
+	{
+		pfAltMask = 0;
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
+		pfAlt = 0;
+		return;
+	}
+	pfAlt = cells;
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	pfAltMask = (uint8_t)(mask & 0x7fu);
+}
+void c12_perf_set_repeat(unsigned div, unsigned mask, unsigned shape)
+{
+	brMaskReq = (uint8_t)(mask & 0x7fu);
+	brShapeReq = (uint8_t)(shape < 3u ? shape : 0u);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	brDivReq = (uint8_t)(div < C12_DIVS ? div : 0u);
+}
+void c12_perf_note_repeat(int track, unsigned div, int velocity, int chance, unsigned curve)
+{
+	if (track < 0 || track >= C12_TRACKS) return;
+	nrVel[track] = (uint8_t)(velocity < 1 ? 1 : velocity > 127 ? 127 : velocity);
+	nrChance[track] = (uint8_t)(chance < 0 ? 0 : chance > 100 ? 100 : chance);
+	nrCurve[track] = (uint8_t)(curve < C12_CURVES ? curve : 0u);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	nrDiv[track] = (uint8_t)(div < C12_DIVS ? div : 0u);
+}
+void c12_perf_play(int track, uint32_t cell)
+{
+	if (track < 0 || track >= C12_TRACKS || !POCKET_CELL_VELOCITY(cell)) return;
+	playCell[track] = cell;
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	playSeq[track]++;
+}
+
+int c12_mix_schedule(const struct c12_mix_state* s, int at_bar)
+{
+	if (__atomic_load_n(&stagePending, __ATOMIC_ACQUIRE)) return -1;
+	stage = *s;
+	stageAtBar = at_bar ? 1 : 0;
+	__atomic_store_n(&stagePending, 1, __ATOMIC_RELEASE);
+	return 0;
+}
+int c12_mix_schedule_pending(void) { return __atomic_load_n(&stagePending, __ATOMIC_ACQUIRE); }
+void c12_mix_get(struct c12_mix_state* out)
+{
+	for (int t = 0; t < C12_TRACKS; t++)
+	{
+		out->level[t] = mixLevel[t];
+		out->delay[t] = mixDelay[t];
+		out->reverb[t] = mixReverb[t];
+	}
+	out->mute = mixMute;
+	out->solo = mixSolo;
+	out->route = mixRoute;
+	out->master = mixMaster;
 }
 
 /* ------------------------------------------------------------------ init */
@@ -269,6 +860,9 @@ static const uint8_t fxMax[C12_FX_PARAMS] = {
 	[C12_FX_DRIVE_LEVEL] = 127, [C12_FX_RING_WET] = 100, [C12_FX_RING_FREQ] = 127, [C12_FX_COMP_WET] = 100,
 	[C12_FX_COMP_THRESH] = 127, [C12_FX_COMP_RATIO] = 5, [C12_FX_COMP_ATTACK] = 127, [C12_FX_COMP_RELEASE] = 127,
 	[C12_FX_COMP_GAIN] = 127, [C12_FX_CRUSH_BITS] = 16, [C12_FX_RATE] = 127, [C12_FX_LIMITER] = 1,
+	[C12_FX_DLY_TIME] = C12_DELAY_DIVISIONS - 1, [C12_FX_DLY_FEEDBACK] = 100, [C12_FX_DLY_FILTER] = 127, [C12_FX_DLY_WET] = 100,
+	[C12_FX_DLY_PINGPONG] = 1, [C12_FX_VERB_SIZE] = 100, [C12_FX_VERB_DECAY] = 100, [C12_FX_VERB_DAMP] = 100,
+	[C12_FX_VERB_WET] = 100, [C12_FX_SPACE_ENGINE] = 1,
 };
 /* off, and the LXR FX bus's own starting points where on */
 static const uint8_t fxDefault[C12_FX_PARAMS] = {
@@ -276,6 +870,10 @@ static const uint8_t fxDefault[C12_FX_PARAMS] = {
 	[C12_FX_DRIVE_LEVEL] = 80, [C12_FX_RING_WET] = 0, [C12_FX_RING_FREQ] = 40, [C12_FX_COMP_WET] = 0,
 	[C12_FX_COMP_THRESH] = 90, [C12_FX_COMP_RATIO] = 3, [C12_FX_COMP_ATTACK] = 10, [C12_FX_COMP_RELEASE] = 40,
 	[C12_FX_COMP_GAIN] = 20, [C12_FX_CRUSH_BITS] = 16, [C12_FX_RATE] = 127, [C12_FX_LIMITER] = 1,
+	/* a dotted eighth, a few repeats, a little darker; a mid-sized room */
+	[C12_FX_DLY_TIME] = 7, [C12_FX_DLY_FEEDBACK] = 40, [C12_FX_DLY_FILTER] = 44, [C12_FX_DLY_WET] = 70,
+	[C12_FX_DLY_PINGPONG] = 1, [C12_FX_VERB_SIZE] = 60, [C12_FX_VERB_DECAY] = 45, [C12_FX_VERB_DAMP] = 45,
+	[C12_FX_VERB_WET] = 60, [C12_FX_SPACE_ENGINE] = 0,
 };
 int c12_fx_max(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxMax[fx] : 0; }
 int c12_fx_min(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxMin[fx] : 0; }
@@ -315,6 +913,21 @@ static void fx_apply(void)
 	crushStep = bits >= 16u ? 0.f : (float)(1u << (16u - bits));
 	crushInv = crushStep > 0.f ? 1.f / crushStep : 0.f;
 	limiterOn = fxValue[C12_FX_LIMITER];
+	struct c12_space_params sp;
+	sp.delay_division = fxValue[C12_FX_DLY_TIME];
+	sp.delay_feedback = fxValue[C12_FX_DLY_FEEDBACK];
+	sp.delay_filter = fxValue[C12_FX_DLY_FILTER];
+	sp.delay_wet = fxValue[C12_FX_DLY_WET];
+	sp.delay_pingpong = fxValue[C12_FX_DLY_PINGPONG];
+	sp.verb_size = fxValue[C12_FX_VERB_SIZE];
+	sp.verb_decay = fxValue[C12_FX_VERB_DECAY];
+	sp.verb_damp = fxValue[C12_FX_VERB_DAMP];
+	sp.verb_wet = fxValue[C12_FX_VERB_WET];
+	sp.delay_freeze = pfFreezeD;
+	sp.verb_freeze = pfFreezeR;
+	spaceBpm = pocket_seq_tempo();
+	c12_space_set(&sp, spaceBpm);
+	spaceOn = fxValue[C12_FX_SPACE_ENGINE] == 0;
 }
 
 int c12_engine_init(uint32_t out_rate, uint32_t seed)
@@ -332,7 +945,19 @@ int c12_engine_init(uint32_t out_rate, uint32_t seed)
 	outRate = out_rate;
 	memset((void*)&st, 0, sizeof st);
 	memset((void*)&prof, 0, sizeof prof);
-	memset(rolls, 0, sizeof rolls);
+	memset(strk, 0, sizeof strk);
+	memset(grace, 0, sizeof grace);
+	memset(graceFor, 0, sizeof graceFor);
+	pfThrowD = pfThrowR = pfFreezeD = pfFreezeR = pfFill = pfAltMask = 0;
+	pfDensity = 0;
+	pfAlt = 0;
+	brDivReq = brMaskReq = brShapeReq = 0;
+	brNow = brPending = brOn = 0;
+	for (int t = 0; t < C12_TRACKS; t++) { nrDiv[t] = nrNow[t] = 0; playSeen[t] = playSeq[t]; playWaiting[t] = 0; }
+	stagePending = 0;
+	trigCount = blockCount = 0;
+	musNow = musStepStart = gridOrigin = 0;
+	wasRunning = 0;
 	for (int p = 1; p < POCKET_SOUND_PARAMS; p++)
 		kitTarget[p] = kitSent[p] = (uint8_t)pocket_lxr_init_kit_value(p);
 	for (int t = 0; t < C12_TRACKS; t++)
@@ -468,7 +1093,7 @@ static IN_ITCM_RAM void mix_block(void)
 		}
 		}
 	sends:;
-		const unsigned d = mixDelay[track], r = mixReverb[track];
+		const unsigned d = (pfThrowD >> track & 1u) ? 127u : mixDelay[track], r = (pfThrowR >> track & 1u) ? 127u : mixReverb[track];
 		if (d | r)
 		{
 			if (!anySend)
@@ -484,6 +1109,13 @@ static IN_ITCM_RAM void mix_block(void)
 				sendR[i] += m * gr;
 			}
 		}
+	}
+	/* CLATTER 12's delay and reverb: their returns join the mix before the master and the limiter */
+	if (spaceOn)
+	{
+		const uint32_t ts = now_us();
+		if (c12_space_process(sendD, sendR, anySend, busMixL, busMixR, C12_LXR_BLOCK)) st.space_blocks++;
+		prof.space_us += now_us() - ts;
 	}
 	/* the routed voices through the FX chain, at the master gain Pocket's mix has */
 	if (fxOn)
@@ -554,7 +1186,8 @@ static IN_ITCM_RAM void mix_block(void)
 	}
 	prof.peak = peak;
 	prof.limited += limited;
-	/* the sends' ring */
+	/* the sends' ring (for Plinky's delay and reverb) */
+	if (spaceOn) anySend = 0;
 	for (int i = 0; i < C12_LXR_BLOCK; i++)
 	{
 		const uint32_t w = (sendWrite + (uint32_t)i) & (SEND_CAP - 1u);
@@ -587,17 +1220,16 @@ static IN_ITCM_RAM void sends_out(unsigned frames)
 
 const int32_t* c12_engine_send(int which)
 {
-	return sendsActive && (which == 0 || which == 1) ? sendOut[which] : 0;
+	return !spaceOn && sendsActive && (which == 0 || which == 1) ? sendOut[which] : 0;
 }
 
-static inline uint32_t now_us(void) { return clockFn ? clockFn() : 0u; }
 
 IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 {
 	if (frames > 128) frames = 128;
 	const uint32_t t0 = now_us();
 	uint32_t tl = 0, tm = 0;
-	if (fxApplied != fxSerial)
+	if (fxApplied != fxSerial || spaceBpm != pocket_seq_tempo())
 	{
 		fxApplied = fxSerial;
 		__atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -667,6 +1299,12 @@ void c12_engine_stats_read(struct c12_engine_stats* out)
 	out->clipped = st.clipped;
 	out->underruns = st.underruns;
 	out->strokes = st.strokes;
+	out->graces = st.graces;
+	out->repeats = st.repeats;
+	out->added = st.added;
+	out->dropped = st.dropped;
+	out->thinned_strokes = st.thinned_strokes;
+	out->space_blocks = st.space_blocks;
 }
 
 void c12_engine_set_clock(c12_clock_fn fn) { clockFn = fn; }
@@ -675,6 +1313,7 @@ void c12_engine_profile_read(struct c12_engine_profile* out)
 {
 	memcpy(out, (const void*)&prof, sizeof *out);
 	memset((void*)&prof, 0, sizeof prof);
+	c12_space_peaks(&out->delay_peak, &out->verb_peak);
 }
 
 /* ------------------------------------------------------------------ mixer (control) */

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CLATTER 12</title>
-<meta name="description" content="CLATTER's LXR drum synthesis and generative sequencer as a native Plinky 12 custom panel: SEQ, SOUND, GEN, MIX and FX pages on the 16 x 16 pressure grid. Experimental: not yet run on a Plinky 12.">
+<meta name="description" content="CLATTER's LXR drum synthesis and generative sequencer as a native Plinky 12 custom panel: SEQ, SOUND, GEN, MIX, FX, PERFORM and REPEAT pages on the 16 x 16 pressure grid, with its own delay and reverb, rolls, repeats and tap tempo. Experimental: not yet run on a Plinky 12.">
 <meta property="og:title" content="CLATTER 12">
 <meta property="og:description" content="Seven voices of authentic LXR drum synthesis on the Plinky 12's 16 x 16 pressure grid. Experimental: emulator only.">
 <meta property="og:type" content="website">
@@ -29,7 +29,7 @@
 <section class="hero" aria-labelledby="h-title">
   <h1 id="h-title" class="title">CLATTER <i>12</i></h1>
   <p class="sub">The CLATTER drum machine, native to the Plinky 12.</p>
-  <p class="lede">Seven voices of authentic LXR drum synthesis, a generative sequencer and procedural kits on a 16 × 16 grid of pressure-sensitive pads. Five pages: SEQ, SOUND, GEN, MIX, FX. One custom panel, built into Plinky's own firmware. Play it below: the page runs the panel's own code.</p>
+  <p class="lede">Seven voices of authentic LXR drum synthesis, a generative sequencer and procedural kits on a 16 × 16 grid of pressure-sensitive pads. Seven pages: SEQ, SOUND, GEN, MIX, FX, and for playing live, PERFORM and REPEAT. A tempo pad on every page. One custom panel, built into Plinky's own firmware. Play it below: the page runs the panel's own code.</p>
   <div class="cta">
     <a class="button primary" href="#grid">PLAY IT NOW</a>
     <a class="button" href="#what">WHAT IS IT</a>
@@ -39,12 +39,12 @@
 
 <section id="grid" aria-labelledby="h-grid">
   <h2 id="h-grid" class="section"><span>01</span> Play it</h2>
-  <p class="intro">This grid is <b>the panel's own interface</b>: CLATTER 12's firmware source, engine and all, compiled to WebAssembly with a stand-in for the Plinky's API, so every pad does here exactly what it does in the firmware. <b>Tap a pad to put a step in</b>, press <b>PLY</b> (bottom right), and use row 15's first six pads to change page. Hover or tap anything to read what it does.</p>
-  <p class="fine" style="margin:-10px 0 18px">It is an interface demonstration, not a Plinky: no pressure sensor, no Plinky delay or reverb (the sends are silent here), no CPU limit, and it says nothing about how the hardware will perform.</p>
+  <p class="intro">This grid is <b>the panel's own interface</b>: CLATTER 12's firmware source, engine and all, compiled to WebAssembly with a stand-in for the Plinky's API, so every pad does here exactly what it does in the firmware. <b>Tap a pad to put a step in</b>, press <b>PLY</b> (bottom right), and use row 15's first eight pads to change page. <b>TMP</b> (row 15) is the tempo: tap it in time, or hold it (Shift-click) for the tempo overlay. Hover or tap anything to read what it does, and what kind of control it is: momentary, toggle, continuous or destructive.</p>
+  <p class="fine" style="margin:-10px 0 18px">It is an interface demonstration, not a Plinky: no pressure sensor (the slider stands in), no Plinky output stage, no CPU limit, and it says nothing about how the hardware will perform. CLATTER 12's own delay and reverb (FX page, SPACE) do run here, as in the firmware; with FX ENGINE set to PLINKY the sends go to Plinky's effects, which are not here, so they fall silent.</p>
   <div class="guide">
     <div class="stage">
-      <div class="pagebar" id="pagebar" role="group" aria-label="Pages (the same as row 15's first six pads)">
-        <button type="button" data-page="0">SEQ</button><button type="button" data-page="1">SOUND</button><button type="button" data-page="2">GEN</button><button type="button" data-page="3">MIX</button><button type="button" data-page="4">FX</button><button type="button" data-page="5">SAVE</button>
+      <div class="pagebar" id="pagebar" role="group" aria-label="Pages (the same as row 15's first eight pads)">
+        <button type="button" data-page="0">SEQ</button><button type="button" data-page="1">SOUND</button><button type="button" data-page="2">GEN</button><button type="button" data-page="3">MIX</button><button type="button" data-page="4">FX</button><button type="button" data-page="5">PERFORM</button><button type="button" data-page="6">REPEAT</button><button type="button" data-page="7">SAVE</button>
       </div>
       <div class="board faceplate" id="board">
         <div class="plinky" id="plinky">
@@ -67,7 +67,7 @@
         <label class="chip filechip">LOAD PROJECT<input id="load" type="file" accept=".json,application/json"></label>
         <button class="chip" id="face" type="button" aria-pressed="true">FACEPLATE</button>
       </div>
-      <p class="fine">A mouse has one pressure, so the slider stands in for how hard you press (a pen uses its real pressure). Two-handed gestures (hold a step and tap the editor rows below it; hold a page pad and tap another to copy) work with two fingers on a touch screen; with a mouse, <kbd>Shift</kbd>-click a pad to keep it held, and RELEASE HELD lets go. SAVE PROJECT downloads the very JSON the panel gives Plinky's save page.</p>
+      <p class="fine">A mouse has one pressure, so the slider stands in for how hard you press (a pen uses its real pressure): on REPEAT it is the repeats' velocity, rate or chance. Two-handed gestures (hold a step and tap the editor rows below it; hold TMP and tap the overlay; hold a page pad and tap another to copy) work with two fingers on a touch screen; with a mouse, <kbd>Shift</kbd>-click a pad to keep it held, and RELEASE HELD lets go. PERFORM and REPEAT pads are momentary: they last while held; their LAT pad (row 15) makes a tap hold instead. SAVE PROJECT downloads the very JSON the panel gives Plinky's save page.</p>
     </div>
     <aside class="readout" id="readout" aria-live="polite" aria-label="What the selected pad does">
       <p class="readout-name" id="ro-name">READOUT</p>
@@ -87,8 +87,8 @@
     </article>
     <article class="window">
       <h3 class="tab">SEQ: rhythm first</h3>
-      <p>Seven LXR triggers by 16 steps. Tap a pad on, tap it off; hold it to edit it: variation, condition (1:2 to 4:4, chance), ratchet up to 8×, roll spacing and velocity run. No variation lanes: the freed rows are the step editor, mute, solo, lock, length and swing.</p>
-      <p class="tags">PRESSURE · CONDITIONS · RATCHETS</p>
+      <p>Seven LXR triggers by 16 steps. Tap a pad on, tap it off; hold it to edit it: variation, condition (1:2 to 4:4, chance), ratchet (2, 3, 4, 6 or 8 strokes, never closer than 12 ms) with a velocity curve (flat, fade in, fade out, accent first or last, alternating, human), and a roll: flam, drag, double or triple stroke, accelerating or decelerating. Flams and drags lead their step, so the hit stays on the beat. Stopped, every choice is played as you make it.</p>
+      <p class="tags">PRESSURE · CONDITIONS · RATCHETS · ROLLS</p>
     </article>
     <article class="window">
       <h3 class="tab">SOUND: the LXR, a row each</h3>
@@ -102,8 +102,18 @@
     </article>
     <article class="window">
       <h3 class="tab">MIX and FX</h3>
-      <p>Channel strips: level, pan, mute, solo, delay and reverb sends into Plinky's own effects, master. The LXR-02's own drive, ring modulator and compressor on the tracks you route, bit and sample-rate reduction, and a limiter.</p>
+      <p>Channel strips: level, pan, mute, solo, delay and reverb sends, master. FX has two banks. SPACE: CLATTER 12's own delay (twelve tempo-synced divisions, feedback, a low/high-pass filter, wet, ping-pong, freeze) and reverb (size, decay, damping, wet, freeze); or send to Plinky's own effects instead. COLOUR: the LXR-02's own drive, ring modulator and compressor on the tracks you route, bit and sample-rate reduction, and a limiter.</p>
       <p class="tags">REAL AUDIO · NOT JUST LIGHTS</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">PERFORM: hands on the beat</h3>
+      <p>Momentary mutes and solos, kills (low, mid, high, all), fills that build to the bar, a temporary mutation, density thinner or busier, stutters, delay and reverb throws, freezes, and eight scenes recalled at the next bar. Everything lasts while held and leaves the pattern alone; LATCH holds it; COMMIT (held) writes it in, and UNDO takes it back.</p>
+      <p class="tags">MOMENTARY · LATCH · COMMIT · SCENES</p>
+    </article>
+    <article class="window">
+      <h3 class="tab">REPEAT and TEMPO</h3>
+      <p>Hold a track to repeat it on the grid, straight, triplet or dotted, from 1/4 to 1/64, harder for louder (or faster, or more often), with a velocity curve. Roll pads play flams, drags and rolls by hand. Beat repeat loops the last bar, half, quarter, eighth or less of the sequence itself. TMP on every page: tap it in time, or hold it for the BPM, ±1/5/10, half and double time, presets and a nudge.</p>
+      <p class="tags">NOTE REPEAT · BEAT REPEAT · TAP TEMPO</p>
     </article>
   </div>
 </section>
@@ -118,9 +128,9 @@
     <table>
       <thead><tr><th>Where</th><th>Result</th></tr></thead>
       <tbody>
-        <tr><th>Desktop tests</th><td class="ok"><b>Pass.</b> The engine matches CLATTER Pocket's reference build (spectra within 0.03 dB per band); the panel passes 127 scripted checks in CLATTER 12's simulator of the Plinky API: steps, variations, conditions over whole passes, ratchets, kits, mixer, FX, saving and loading, undo.</td></tr>
-        <tr><th>Cortex-M33 compile</th><td class="ok"><b>Compiles</b> for the RP2350's core with GCC: about 89 KB of code and 27 KB of constants for engine and panel, no software double-precision anywhere.</td></tr>
-        <tr><th>CPU (an estimate)</th><td class="no"><b>Tight.</b> In QEMU's Cortex-M33 model the engine runs about 168,000 instructions per 2 ms audio block on average and 244,000 in the busiest (two LXR blocks). At 150 MHz that is at least 56 % and 81 % of the audio core before memory wait states. Only a Plinky can say if it fits.</td></tr>
+        <tr><th>Desktop tests</th><td class="ok"><b>Pass.</b> The engine matches CLATTER Pocket's reference build (spectra within 0.03 dB per band); the panel passes 201 scripted checks in CLATTER 12's simulator of the Plinky API (steps, conditions, ratchets and rolls, kits, mixer, both FX banks, tap tempo and the tempo overlay, PERFORM's release and COMMIT, scenes at the bar, REPEAT, saving and loading old and new projects, undo), and 66 more time ratchets, rolls, repeats, fills, scenes and the delay and reverb to the engine's block.</td></tr>
+        <tr><th>Cortex-M33 compile</th><td class="ok"><b>Compiles</b> for the RP2350's core with GCC: about 117 KB of code and 27 KB of constants for engine and panel, 41 KB of static SRAM besides the LXR's 100 KB of tables, the delay and reverb's 282 KB in PSRAM, no software double-precision anywhere.</td></tr>
+        <tr><th>CPU (an estimate)</th><td class="no"><b>Tight.</b> In QEMU's Cortex-M33 model the engine runs about 169,000 instructions per 2 ms audio block on average and 245,000 in the busiest (two LXR blocks): at 150 MHz at least 56 % and 82 % of the audio core before memory wait states. CLATTER 12's delay and reverb, when something is sent to them, add about 21,700 (7 %) and take the busiest blocks past the budget; off or idle they cost nothing, and FX ENGINE: PLINKY hands the sends to Plinky's own effects instead. Only a Plinky can say if it fits.</td></tr>
         <tr><th>This page</th><td class="ok"><b>Runs the panel itself</b> as WebAssembly: the firmware's interface and engine, with a simulator standing in for the Plinky.</td></tr>
         <tr><th>Plinky's emulator</th><td class="ok"><b>Ran the first version</b> with no underruns. This version has not been tried there yet.</td></tr>
         <tr><th>A Plinky 12</th><td class="no"><b>Never run.</b></td></tr>
@@ -137,7 +147,7 @@
     <li>Get the source: <code>git clone --recurse-submodules https://github.com/clickysteve/clatter-12</code></li>
     <li>Build the panel and run the tests: <code>make</code>. It writes <code>build/clatter_12.cpp</code>.</li>
     <li>Open <a href="https://plinky12.com/codeed.html">Plinky's code editor</a> (closed beta: access comes from their Discord), paste the file into a new tab, press <b>Test</b>.</li>
-    <li>Play: <b>PLY</b> starts the beat, a hard press makes a loud step, holding a step lets the rows under it change it, and row 15 moves between SEQ, SOUND, GEN, MIX, FX and SAVE.</li>
+    <li>Play: <b>PLY</b> starts the beat, a hard press makes a loud step, holding a step lets the rows under it change it, <b>TMP</b> taps the tempo, and row 15 moves between SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT and SAVE.</li>
   </ol>
   <pre>git clone --recurse-submodules https://github.com/clickysteve/clatter-12
 cd clatter-12

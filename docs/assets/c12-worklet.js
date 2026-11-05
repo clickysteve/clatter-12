@@ -31,9 +31,16 @@ class C12Panel extends AudioWorkletProcessor {
     return s.length;
   }
   str(p) {
+    /* UTF-8 (the pads' descriptions use "·" and "½"): AudioWorkletGlobalScope has no TextDecoder */
     const m = new Uint8Array(this.x.memory.buffer, p);
     let s = '';
-    for (let i = 0; m[i]; i++) s += String.fromCharCode(m[i]);
+    for (let i = 0; m[i];) {
+      const a = m[i++];
+      if (a < 0x80) s += String.fromCharCode(a);
+      else if (a < 0xe0) s += String.fromCharCode(((a & 0x1f) << 6) | (m[i++] & 0x3f));
+      else if (a < 0xf0) { const b = m[i++], c = m[i++]; s += String.fromCharCode(((a & 0x0f) << 12) | ((b & 0x3f) << 6) | (c & 0x3f)); }
+      else { i += 3; s += '?'; }
+    }
     return s;
   }
 
@@ -66,7 +73,7 @@ class C12Panel extends AudioWorkletProcessor {
     const x = this.x;
     const leds = new Uint32Array(x.memory.buffer, x.c12p_leds(), 256).slice();
     const status = [];
-    for (let i = 0; i < 9; i++) status.push(x.c12p_status(i));
+    for (let i = 0; i < 13; i++) status.push(x.c12p_status(i));
     this.port.postMessage({ t: 'state', leds, page: x.c12p_page(), playing: x.c12p_playing(), tempo: x.c12p_tempo(), status, peak: this.peak / 32768 }, [leds.buffer]);
     this.peak = 0;
   }

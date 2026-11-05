@@ -10,6 +10,7 @@
  */
 #include <stdint.h>
 #include "c12_engine.h"
+#include "c12_space.h"
 #include "c12_params.h"
 #include "c12_kitgen.h"
 #include "pocket_lxr.h"
@@ -30,8 +31,10 @@ static const int c12x_not_playing = POCKET_SEQ_NOT_PLAYING;
 static const int c12x_note_programmed = POCKET_SEQ_NOTE_PROGRAMMED;
 static const int c12x_conditions = POCKET_CONDITIONS;
 static const int c12x_ratchets = C12_RATCHETS;
-static const int c12x_roll_shapes = C12_ROLL_SHAPES;
-static const int c12x_ramps = C12_RAMPS;
+static const int c12x_rolls = C12_ROLLS;
+static const int c12x_curves = C12_CURVES;
+static const int c12x_delay_divisions = C12_DELAY_DIVISIONS;
+static const int c12x_space_bytes = (int)C12_SPACE_BYTES;
 static const int c12x_banks = C12_BANKS;
 static const int c12x_bank_rows = C12_BANK_ROWS;
 static const int c12x_kind_range = C12_KIND_RANGE;
@@ -53,8 +56,21 @@ enum {
 	c12x_fx_ring_freq = C12_FX_RING_FREQ, c12x_fx_comp_wet = C12_FX_COMP_WET, c12x_fx_comp_thresh = C12_FX_COMP_THRESH,
 	c12x_fx_comp_ratio = C12_FX_COMP_RATIO, c12x_fx_comp_attack = C12_FX_COMP_ATTACK, c12x_fx_comp_release = C12_FX_COMP_RELEASE,
 	c12x_fx_comp_gain = C12_FX_COMP_GAIN, c12x_fx_crush_bits = C12_FX_CRUSH_BITS, c12x_fx_rate = C12_FX_RATE,
-	c12x_fx_limiter = C12_FX_LIMITER, c12x_fx_params = C12_FX_PARAMS
+	c12x_fx_limiter = C12_FX_LIMITER, c12x_fx_dly_time = C12_FX_DLY_TIME, c12x_fx_dly_feedback = C12_FX_DLY_FEEDBACK,
+	c12x_fx_dly_filter = C12_FX_DLY_FILTER, c12x_fx_dly_wet = C12_FX_DLY_WET, c12x_fx_dly_pingpong = C12_FX_DLY_PINGPONG,
+	c12x_fx_verb_size = C12_FX_VERB_SIZE, c12x_fx_verb_decay = C12_FX_VERB_DECAY, c12x_fx_verb_damp = C12_FX_VERB_DAMP,
+	c12x_fx_verb_wet = C12_FX_VERB_WET, c12x_fx_space_engine = C12_FX_SPACE_ENGINE, c12x_fx_params = C12_FX_PARAMS
 };
+enum {
+	c12x_div_off = C12_DIV_OFF, c12x_div_bar = C12_DIV_BAR, c12x_div_2 = C12_DIV_2, c12x_div_4 = C12_DIV_4, c12x_div_8 = C12_DIV_8,
+	c12x_div_16 = C12_DIV_16, c12x_div_32 = C12_DIV_32, c12x_div_64 = C12_DIV_64, c12x_div_4t = C12_DIV_4T, c12x_div_8t = C12_DIV_8T,
+	c12x_div_16t = C12_DIV_16T, c12x_div_32t = C12_DIV_32T, c12x_div_8d = C12_DIV_8D, c12x_div_16d = C12_DIV_16D, c12x_divs = C12_DIVS
+};
+enum {
+	c12x_roll_none = C12_ROLL_NONE, c12x_roll_flam = C12_ROLL_FLAM, c12x_roll_drag = C12_ROLL_DRAG, c12x_roll_double = C12_ROLL_DOUBLE,
+	c12x_roll_triple = C12_ROLL_TRIPLE, c12x_roll_accel = C12_ROLL_ACCEL, c12x_roll_decel = C12_ROLL_DECEL
+};
+enum { c12x_curve_flat = C12_CURVE_FLAT, c12x_condition_25 = POCKET_CONDITION_25 };
 
 static inline uint32_t c12x_cell(int velocity, unsigned tone) { return POCKET_CELL(velocity, tone); }
 static inline unsigned c12x_cell_velocity(uint32_t cell) { return POCKET_CELL_VELOCITY(cell); }
@@ -62,7 +78,7 @@ static inline unsigned c12x_cell_variation(uint32_t cell) { return POCKET_CELL_V
 static inline unsigned c12x_cell_condition(uint32_t cell) { return POCKET_CELL_CONDITION(cell); }
 static inline unsigned c12x_cell_ratchet(uint32_t cell) { return C12_CELL_RATCHET(cell); }
 static inline unsigned c12x_cell_roll(uint32_t cell) { return C12_CELL_ROLL(cell); }
-static inline unsigned c12x_cell_ramp(uint32_t cell) { return C12_CELL_RAMP(cell); }
+static inline unsigned c12x_cell_curve(uint32_t cell) { return C12_CELL_CURVE(cell); }
 static inline uint32_t c12x_cell_with_velocity(uint32_t cell, int v) { return (cell & ~0xffu) | (uint32_t)(v & 0x7f); }
 static inline uint32_t c12x_cell_with_variation(uint32_t cell, unsigned variation)
 {
@@ -72,9 +88,10 @@ static inline uint32_t c12x_cell_with_condition(uint32_t cell, unsigned conditio
 {
 	return (cell & ~(15u << 16)) | (uint32_t)(condition & 15u) << 16;
 }
-static inline uint32_t c12x_cell_with_ext(uint32_t cell, unsigned ratchet, unsigned roll, unsigned ramp)
+static inline uint32_t c12x_cell_with_ext(uint32_t cell, unsigned ratchet, unsigned curve, unsigned roll)
 {
-	return C12_CELL_WITH_EXT(cell, ratchet, roll, ramp);
+	return C12_CELL_WITH_EXT(cell, ratchet, curve, roll);
 }
+static inline int c12x_pattern_steps(const struct pocket_pattern* p) { return (int)POCKET_PATTERN_STEPS(p); }
 static inline unsigned c12x_tone_variation(unsigned variation) { return POCKET_TONE_VARIATION(variation); }
 static inline int c12x_variation_last(int trig) { return POCKET_VARIATION_LAST(trig); }

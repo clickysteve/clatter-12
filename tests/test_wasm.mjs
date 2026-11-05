@@ -48,21 +48,44 @@ check(bright(L[3]) > 30, 'a tapped step lights');
 x.c12p_touch(3, 0, 120); frame(90); tap(1, 8); x.c12p_touch(3, 0, 0); frame(3);
 check(bright(leds()[3]) > 30, 'the held, edited step stays on');
 
-// every page: reachable from row 15, and every lit pad has a description
-const pages = ['SEQ', 'SOUND', 'GEN', 'MIX', 'FX'];
-for (let p = 0; p < pages.length; p++) {
-  tap(p, 15);
-  frame(2);
-  check(x.c12p_page() === p, `row 15 pad ${p} opens ${pages[p]}`);
-  L = leds();
-  let missing = [];
+// every page: reachable from row 15, and every pad lit on it has a description
+const pages = ['SEQ', 'SOUND', 'GEN', 'MIX', 'FX', 'PERFORM', 'REPEAT'];
+const described = (label) => {
+  const L = leds();
+  const missing = [];
   for (let i = 0; i < 256; i++) {
     if (bright(L[i]) === 0) continue;
     const t = str(x.c12p_help(i % 16, (i / 16) | 0));
     if (!t || t.split('\n').length < 3) missing.push(`${i % 16},${(i / 16) | 0}`);
   }
-  check(missing.length === 0, `${pages[p]}: every lit pad is described (missing: ${missing.slice(0, 8).join(' ')})`);
+  check(missing.length === 0, `${label}: every lit pad is described (missing: ${missing.slice(0, 8).join(' ')})`);
+};
+for (let p = 0; p < pages.length; p++) {
+  tap(p, 15);
+  frame(2);
+  check(x.c12p_page() === p, `row 15 pad ${p} opens ${pages[p]}`);
+  described(pages[p]);
 }
+tap(7, 15);
+frame(2);
+check(x.c12p_page() === 7, 'row 15 pad 7 opens SAVE');
+x.c12p_set_page(4);
+frame(2);
+tap(9, 0); // FX: the COLOUR bank
+frame(2);
+described('FX COLOUR');
+tap(8, 0);
+// the tempo overlay, held
+x.c12p_set_page(0);
+frame(2);
+x.c12p_touch(8, 15, 150); frame(100);
+check(bright(leds()[1 * 16 + 2]) > 0, 'holding TEMPO shows the overlay');
+described('TEMPO overlay');
+x.c12p_touch(8, 15, 0); frame(3);
+// tap tempo: four taps 400 ms apart
+for (let i = 0; i < 4; i++) { x.c12p_touch(8, 15, 150); frame(10); x.c12p_touch(8, 15, 0); frame(90); }
+check(x.c12p_tempo() === 150, `tap tempo (${x.c12p_tempo()})`);
+x.c12p_set_tempo(120);
 tap(0, 15);
 
 // save, change, load
@@ -70,7 +93,7 @@ const n = x.c12p_save();
 const saved = str(x.c12p_text());
 check(n > 2000 && saved.startsWith('{"clatter12":"'), `a save (${n} bytes)`);
 const before = leds();
-tap(6, 15); // GEN
+tap(9, 15); // GEN (SEQ's row 15)
 frame(4);
 const after = leds();
 check(after.some((c, i) => c !== before[i]), 'GEN changes the grid');

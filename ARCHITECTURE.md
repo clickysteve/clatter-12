@@ -7,19 +7,25 @@
                                                          while converter needs input:
                                                            pocket_lxr_render_q23 (64 frames @ 44 140 Hz)
                                                              ├ drain ≤ 32 queued events
-                                                             ├ block hook: pocket_seq_block, then the
-                                                             │   step's hits and ratchet strokes
+                                                             ├ block hook: pocket_seq_block; a scene
+                                                             │   at the bar; the musical clock; beat
+                                                             │   repeat; the step through FILL,
+                                                             │   DENSITY, the alt pattern; ratchets,
+                                                             │   rolls, graces ahead; note repeats
                                                              └ LXR-02 voices (each kept per block)
-                                                           mix_block: level/mute/solo, sends,
+                                                           mix_block: level/mute/solo, sends (+throws),
+                                                             CLATTER 12's delay + reverb (SPACE),
                                                              LXR FX (drive, ring, comp) on routed
                                                              tracks, master, DC block, bits, limiter
                                                          c12_rs_process  44 140 → 32 000 Hz
           mix_buffers.dry ◀──────────────────────────── int16 stereo
-          mix_buffers.delaysend/reverbsend ◀──────────── sends (linear 44 140 → 32 000 Hz)
+          mix_buffers.delaysend/reverbsend ◀──────────── sends, with FX ENGINE PLINKY only
           Plinky mix/output (level, EQ, delay, reverb)
  core 0  UI ~250 fps ────────────────── on_ui ───────▶ pages: touches → pocket_seq_set_cell / edit_begin+commit,
-                                                         c12_kit_set_target, c12_mix_*, c12_fx_set
+                                                         c12_kit_set_target, c12_mix_*, c12_fx_set,
+                                                         c12_perf_* (PERFORM, REPEAT: every frame)
                                                         transport/tempo → pocket_seq_play / set_tempo
+                                                         (TEMPO pad and overlay: set_tempo_bpm)
                                                         kits → c12_kit_pump → event ring
                                                         LEDs ← pattern, kit, mixer, meters
                                                         on_serialise ↔ the project (save page)
@@ -32,7 +38,7 @@
 | LXR-02 firmware DSP, unchanged | `third_party/clatter-pocket/lxr/upstream` | nothing |
 | CLATTER's shim and parameter handler | `…/lxr/shim`, `…/lxr/bridge/lxr_params.c` | nothing platform-specific |
 | CLATTER Pocket's engine host, sequencer, generator, kit designer | `…/engine/pocket_lxr.c`, `…/seq/*.c` | the layers above |
-| CLATTER 12 core: rate conversion, engine wrapper (mix, FX, limiter, ratchets), kit streaming, LXR parameter table, kit generation and mutation | `core/` | Pocket's APIs, the LXR's FX code |
+| CLATTER 12 core: rate conversion, engine wrapper (mix, FX, limiter, ratchets and rolls, the performance layer), its delay and reverb (`c12_space.c`), kit streaming, LXR parameter table, kit generation and mutation | `core/` | Pocket's APIs, the LXR's FX code |
 | Plinky glue | `panel/clatter12.cpp` | core + public Plinky API |
 | Simulator (host, and WebAssembly for the page) | `sim/` | the Plinky API, as documented and as published panels use it |
 
@@ -64,21 +70,54 @@ Pocket mixes the six voices itself and keeps each voice's block for inspection
 with Pocket's pan law, int16 conversion, master gain and DC blocker, to the bit, so the mixer and
 FX can sit inside the mix without touching Pocket. When the mixer is neutral and no FX are on it
 takes Pocket's own mix of the block instead (the same numbers), which keeps the default cost low.
-Levels ramp over a block; mute and solo also hold back the sequencer's triggers (`seq_emit`), so a
-muted closed hat cannot choke an open one. The hats are one voice; its level and pan follow the hat
-track that last played it. Sends are built per voice and converted linearly to the output rate for
-Plinky's delay and reverb. The FX chain is the LXR firmware's `DSPAudio/FX` master distortion, ring
+Levels ramp over a block; mute and solo also hold back the sequencer's triggers (as voices are
+struck), so a muted closed hat cannot choke an open one. The hats are one voice; its level and pan
+follow the hat track that last played it. Sends are built per voice (a held THROW puts a track's at
+full) and feed CLATTER 12's delay and reverb, or, with FX ENGINE PLINKY, are converted linearly to the
+output rate for Plinky's. The FX chain is the LXR firmware's `DSPAudio/FX` master distortion, ring
 modulator and compressor, unchanged (the amalgamator adds them; the FX bus and its 64 KB delay stay
 out), run in 32-frame chunks because they keep their working buffers on the stack. Then bit
 reduction and a limiter (peak follower, instant attack, -1 dBFS) before the converter.
 
-## Ratchets
+## Ratchets, rolls and the performance layer
 
-Pocket's cell is 32 bits and uses bits 0-19; CLATTER 12 keeps a step's ratchet in bits 20-26
-(strokes, spacing, velocity run), which Pocket's sequencer ignores. The sequencer's emit callback
-only notes what a step plays; the block hook (`block_hook`), right after `pocket_seq_block` in the
-same LXR block, triggers it and schedules the remaining strokes in Pocket's own phase units, so they
-follow tempo and swing and are placed at LXR block resolution, as steps are.
+Pocket's cell is 32 bits and uses bits 0-19; CLATTER 12 keeps a step's articulation in bits 20-28
+(ratchet, velocity curve, roll), which Pocket's sequencer ignores. The sequencer's emit callback only
+notes what a step plays (mute and solo are applied later, as voices are struck); the block hook
+(`block_hook`), right after `pocket_seq_block` in the same LXR block:
+
+1. applies a scene's mixer if one waits for this bar's first step (`c12_mix_schedule`), so the
+   downbeat already sounds in it;
+2. moves the **musical clock**: straight sixteenths in Pocket's phase units, re-anchored at each step,
+   following swing within it (elapsed × 300·rate / the step's real length);
+3. runs **beat repeat**: from its anchor step, the captured steps' offsets are fired as the window
+   (the chosen length) wraps; the masked tracks' own steps are held back meanwhile;
+4. plays a new step: what Pocket emitted, or for tracks under a temporary mutation their cell in the
+   alternative pattern (the panel's memory, published by pointer, double-buffered as Pocket's patterns
+   are), each through FILL and DENSITY (`c12_perf_cell`, pure, so COMMIT writes what was heard), then
+   the hat choke; each hit is scheduled with its ratchet, roll and curve;
+5. looks ahead for flams and drags on the next step: when the step's remaining time is within the
+   grace's lead (and its condition is predictable), the graces are scheduled to land before it;
+6. strikes **note repeats** on their grid (a 64-bit musical time; the grid from PLAY, or free when
+   stopped);
+7. plays cells requested by hand (`c12_perf_play`: rolls, auditions), at once or at the next step;
+8. fires the strokes due (graces, then the step's), in Pocket's own phase units from the moment they
+   were scheduled, so they follow tempo and land on the first block at or after their time.
+
+Every voice trigger goes into a 128-entry log (block, track, velocity, why), read by the tests to
+check timing to the block. The panel side (`perf_apply`, every UI frame, every page) turns held and
+latched pads into those few bytes: nothing of the performance is stored, so releasing a pad restores
+the pattern exactly.
+
+## CLATTER 12's delay and reverb
+
+`core/c12_space.c`, after the per-voice sends are built in `mix_block`: the delay at 44 140 Hz on two
+64 Ki-sample 16-bit lines (ping-pong), the reverb at 22 070 Hz (two allpass diffusers, a four-line
+Hadamard FDN with a damping low-pass and a T60-derived loss in each line). Their returns are added to
+the mix bus before the master gain, the DC blocker and the limiter. Parameters are applied at a block
+start when the FX serial moves or the tempo changes (the delay's time is a tempo division). The lines
+are 282 KB the panel binds at run time (PSRAM at 128 KB in); with nothing sent and every line exactly
+zero (samples truncate towards zero, so tails end) the block returns at once.
 
 ## Rate conversion
 
@@ -93,12 +132,13 @@ than needed, `underruns` counted). About 4 100 multiply-adds per output block (n
 
 | | Size (GCC 13, Cortex-M33, engine and panel) | Where |
 |---|---|---|
-| code | 89 KB (`clatter_12_sram.cpp`: 68 KB flash + 13.5 KB SRAM) | flash / `.time_critical` SRAM |
+| code | 117 KB (`clatter_12_sram.cpp`: 96 KB flash + 14 KB SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
 | LXR tables, unpacked | 100 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
-| other static state (voices, event ring, patterns, converter, mix and send buffers) | 38 KB | static SRAM |
-| panel object (UI state, the kit, 16 undo snapshots, the project) | 38.6 KB | Plinky's 128 KB panel arena |
-| source file | 403 KB (`--compact`) | the IDE |
+| other static state (voices, event ring, patterns, converter, mix and send buffers, strokes, the trigger log) | 41 KB | static SRAM |
+| delay and reverb lines | 282 KB | PSRAM (bound at run time; none: silent) |
+| panel object (UI state, the kit, 16 undo snapshots, the project, two alternative patterns, scenes) | 45.4 KB | Plinky's 128 KB panel arena |
+| source file | 474 KB (`--compact`) | the IDE |
 
 Nothing large is on the stack in CLATTER 12's code (mix buffers are static; the LXR FX's own stack
 buffers are kept to 128 bytes by running them 32 frames at a time). No allocation anywhere. The

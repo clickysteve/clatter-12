@@ -74,7 +74,7 @@ POCKET_SRC = [
 ]
 POCKET_PACKED = ["engine/lxr_tables_packed.c", "engine/lxr_tables_unpack.c", "engine/pocket_param_table.c"]
 
-CORE_SRC = ["core/c12_resampler.c", "core/c12_engine.c", "core/c12_params.c", "core/c12_kitgen.c", "core/c12_exports.c"]
+CORE_SRC = ["core/c12_resampler.c", "core/c12_space.c", "core/c12_engine.c", "core/c12_params.c", "core/c12_kitgen.c", "core/c12_exports.c"]
 
 INCLUDES = [
     os.path.join(ROOT, "core"),

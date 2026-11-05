@@ -4,22 +4,34 @@
    sim/wasm_panel.cpp). So what a pad does here is what the firmware does: nothing about the controls
    is re-implemented in this file. Until sound is started the panel runs on this thread, silent; then
    it moves, with its project, into an AudioWorklet (assets/c12-worklet.js). It is a demonstration of
-   the interface, not a Plinky: no pressure sensor, no Plinky delay or reverb, no CPU limit.
+   the interface, not a Plinky: no pressure sensor, no Plinky delay or reverb (CLATTER 12's own run
+   here, as in the firmware), no CPU limit.
    Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only */
 (() => {
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const PAGES = ['SEQ', 'SOUND', 'GEN', 'MIX', 'FX', 'SAVE'];
+const PAGES = ['SEQ', 'SOUND', 'GEN', 'MIX', 'FX', 'PERFORM', 'REPEAT', 'SAVE'];
+const SAVE_PAGE = 7, LAST_PAGE = 7;
 const STYLES = ['MACHINE', 'ELECTRO', 'BREAKS', 'JUNGLE', 'HALFTIME', 'BROKEN', 'GARAGE', 'INDUSTRIAL', 'GLITCH', 'POLYMETER', 'DUB'];
 const KITS = ['CLASSIC', 'ANALOG', 'DIGITAL', 'INDUSTRIAL', 'MINIMAL', 'GLITCH', 'TECHNO', 'ELECTRO', 'DUB', 'NOISE', 'METALLIC', 'SOFT', 'BROKEN', 'ACID', 'LO-FI', 'CHAOS'];
 /* row 15 is the same on every page: its labels */
-const ROW15 = { 0: 'SEQ', 1: 'SND', 2: 'GEN', 3: 'MIX', 4: 'FX', 5: 'SAV', 12: 'UND', 13: 'RED', 14: 'STP', 15: 'PLY' };
-const ROW15_SEQ = { 6: 'GEN', 7: 'MUT', 8: 'STY', 9: 'CLR' };
+const ROW15 = { 0: 'SEQ', 1: 'SND', 2: 'GEN', 3: 'MIX', 4: 'FX', 5: 'PRF', 6: 'RPT', 7: 'SAV', 8: 'TMP', 12: 'UND', 13: 'RED', 14: 'STP', 15: 'PLY' };
+const ROW15_PAGE = { 0: { 9: 'GEN', 10: 'MUT', 11: 'CLR' }, 5: { 9: 'LAT', 10: 'CMT', 11: 'REL' }, 6: { 9: 'LAT', 11: 'REL' } };
+const ROW_NAMES = {
+  3: { 0: 'MUTE', 1: 'SOLO', 2: 'LEVEL', 10: 'FINE - +', 11: 'PAN', 12: 'DELAY SEND', 13: 'REVERB SEND', 14: 'METER' },
+  5: { 0: 'MUTE · SOLO', 1: 'KILL THROW FRZ', 2: 'THROW D · R', 4: 'FILL', 5: 'MUTATE', 6: 'DENSITY', 8: 'STUTTER', 10: 'SCENES', 13: 'BAR', 14: 'METERS' },
+  6: { 0: 'REPEAT PADS', 1: '', 2: '', 4: 'RATE', 5: 'PRESSURE CURVE', 7: 'ROLL · TARGET', 9: 'BEAT REPEAT', 10: 'SHAPE · TRACKS', 13: 'BAR', 14: 'METERS' },
+};
+const ROW_NAMES_FX = [
+  { 0: 'SENDS · BANK', 1: 'DELAY TIME', 2: 'FEEDBACK', 3: 'FILTER', 4: 'DELAY WET', 5: 'MONO · PING', 7: 'REVERB SIZE', 8: 'DECAY', 9: 'DAMPING', 10: 'REVERB WET', 14: 'RETURNS' },
+  null,
+];
+const ROW_NAMES_TEMPO = { 1: 'BPM', 7: '-10-5-1 ½ 2× +1+5+10', 9: 'PRESETS', 11: 'NUDGE - +', 13: 'TAP', 14: 'RANGE' };
 
 /* ---- the panel: here (silent) or in the audio worklet ---- */
 const P = { mod: null, x: null, node: null, ctx: null, gain: null, state: 'loading', why: '', remote: false,
-  leds: new Uint32Array(256), page: 0, playing: 0, tempo: 120, status: [0, 0, 1, 0, 50, 0, 0, 0, 0], peak: 0, muted: false,
+  leds: new Uint32Array(256), page: 0, playing: 0, tempo: 120, status: [0, 0, 1, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0], peak: 0, muted: false,
   waits: new Map(), id: 0, last: 0, timer: 0 };
 
 function str(p) { const m = new Uint8Array(P.x.memory.buffer, p); let n = 0; while (m[n]) n++; return new TextDecoder().decode(m.subarray(0, n)); }
@@ -47,7 +59,7 @@ function localTick(now) {
     for (let i = 0; i < n; i++) P.x.c12p_frame();
     P.leds.set(new Uint32Array(P.x.memory.buffer, P.x.c12p_leds(), 256));
     P.page = P.x.c12p_page(); P.playing = P.x.c12p_playing(); P.tempo = P.x.c12p_tempo();
-    for (let i = 0; i < 9; i++) P.status[i] = P.x.c12p_status(i);
+    for (let i = 0; i < 13; i++) P.status[i] = P.x.c12p_status(i);
     render();
   }
   P.timer = requestAnimationFrame(localTick);
@@ -148,45 +160,48 @@ function paint(b, c) {
   b.style.boxShadow = m > .45 ? `0 0 ${Math.round(5 + m * 12)}px rgba(${key},${(m * .5).toFixed(2)})` : '';
   b.style.setProperty('--lab', (v[0] * .3 + v[1] * .59 + v[2] * .11) > 120 ? 'rgba(0,0,0,.78)' : 'rgba(255,255,255,.62)');
 }
-let labelsFor = -1;
+let labelsFor = '';
 async function labels() {
   /* row names and pad labels for the page shown, from the panel's own descriptions */
-  const page = P.page;
-  if (labelsFor === page) return;
-  labelsFor = page;
+  const page = P.page, bank = P.status[9], overlay = P.status[10];
+  const key = `${page}/${bank}/${overlay}`;
+  if (labelsFor === key) return;
+  labelsFor = key;
   for (let x = 0; x < 16; x++) {
-    const t = ROW15[x] || (page === 0 ? ROW15_SEQ[x] : '') || '';
+    const t = ROW15[x] || (ROW15_PAGE[page] || {})[x] || '';
     els[15 * 16 + x].firstChild.textContent = t;
   }
   for (let y = 0; y < 15; y++) {
     let name = '';
-    if (page === 0 && y < 7) name = ['DRUM 1', 'DRUM 2', 'DRUM 3', 'SNARE', 'CYMBAL', 'CL HAT', 'OP HAT'][y];
-    else if (page !== 5) {
+    if (overlay) name = ROW_NAMES_TEMPO[y] || '';
+    else if (page === 0 && y < 7) name = ['DRUM 1', 'DRUM 2', 'DRUM 3', 'SNARE', 'CYMBAL', 'CL HAT', 'OP HAT'][y];
+    else if (ROW_NAMES[page]) name = ROW_NAMES[page][y] ?? '';
+    else if (page === 4 && ROW_NAMES_FX[bank]) name = ROW_NAMES_FX[bank][y] ?? '';
+    else if (page !== SAVE_PAGE) {
       for (let x = 0; x < 16 && !name; x++) { const h = await panel.help(x, y); name = h ? h.split('\n')[0] : ''; }
       name = name.replace(/^(DRUM \d|SNARE|CYMBAL|HI-HAT|CL HAT|OP HAT) (?=[A-Z])/, '').replace(/:.*$/, '').replace(/ \d+$/, '');
-      if (page === 0) name = { 8: 'VAR · RATCHET', 9: 'CONDITION', 10: 'ROLL · RAMP', 11: 'VELOCITY', 12: 'MUTE · SOLO', 13: 'LOCK · PLAY', 14: 'PAGE LEN SWING' }[y] || name;
-      if (page === 3) name = { 0: 'MUTE', 1: 'SOLO', 2: 'LEVEL', 10: 'FINE - +', 11: 'PAN', 12: 'DELAY SEND', 13: 'REVERB SEND', 14: 'METER' }[y] ?? '';
-      if (page === 4) name = name.replace('COMPRESSOR', 'COMP').replace(' (WET)', '').replace('RING MOD', 'RING').replace(/ RATIO.*/, ' RATIO').replace(/SHAPE.*/, 'SHAPE');
+      if (page === 0) name = { 8: 'VAR · RATCHET', 9: 'CONDITION', 10: 'ROLL · CURVE', 11: 'VELOCITY', 12: 'MUTE · SOLO', 13: 'LOCK · PLAY', 14: 'PAGE LEN SWING' }[y] || name;
+      if (page === 4) name = { 0: 'ROUTE · BANK' }[y] || name.replace('COMPRESSOR', 'COMP').replace(' (WET)', '').replace('RING MOD', 'RING').replace(/ RATIO.*/, ' RATIO').replace(/SHAPE.*/, 'SHAPE');
       if (page === 2) name = name.replace('MUTATION AMOUNT', 'MUT AMOUNT');
     }
-    if (labelsFor !== page) return;
-    rowEls[y].textContent = name.slice(0, 14);
+    if (labelsFor !== key) return;
+    rowEls[y].textContent = name.slice(0, 16);
   }
-  rowEls[15].textContent = 'PAGES · PLAY';
-  if (P.page === 5) rowEls[7].textContent = "PLINKY'S SAVE PAGE";
+  rowEls[15].textContent = 'PAGES TEMPO · PLAY';
+  if (page === SAVE_PAGE) rowEls[7].textContent = "PLINKY'S SAVE PAGE";
 }
 function render() {
   for (let i = 0; i < 256; i++) paint(els[i], P.leds[i]);
   labels();
   lcd();
-  $('#savepage').hidden = P.page !== 5;
+  $('#savepage').hidden = P.page !== SAVE_PAGE;
   for (const b of document.querySelectorAll('#pagebar button')) b.setAttribute('aria-pressed', String(+b.dataset.page === P.page));
 }
 function lcd() {
   const el = $('#lcd'), s = P.status;
   const snd = { loading: 'LOADING', off: 'SOUND OFF', starting: 'STARTING...', on: P.muted ? 'MUTED' : 'SOUND ON', failed: 'NO SOUND' }[P.state];
   const html = P.sayUntil > performance.now() ? `<b>${P.say}</b>`
-    : `<span>PAGE <b>${PAGES[P.page] || '-'}</b></span><span><b>${P.tempo}</b> BPM</span><span>${P.playing ? '<b>PLAYING</b>' : 'STOPPED'}</span><span>LENGTH <b>${s[2] * 16}</b></span><span>SWING <b>${s[4]}</b></span><span>STYLE <b>${STYLES[s[0]] || ''}</b></span><span>KIT <b>${KITS[s[1]] || ''}</b></span><span>UNDO <b>${s[7]}</b></span><span id="snd">${snd}</span>`;
+    : `<span>PAGE <b>${PAGES[P.page] || '-'}</b></span><span><b>${P.tempo}</b> BPM</span><span>${P.playing ? '<b>PLAYING</b>' : 'STOPPED'}</span><span>LENGTH <b>${s[2] * 16}</b></span><span>SWING <b>${s[4]}</b></span><span>STYLE <b>${STYLES[s[0]] || ''}</b></span><span>KIT <b>${KITS[s[1]] || ''}</b></span><span>FX <b>${s[12] ? 'PLINKY' : 'CLATTER 12'}</b></span>${s[11] ? '<span><b>LATCH</b></span>' : ''}<span>UNDO <b>${s[7]}</b></span><span id="snd">${snd}</span>`;
   if (el._h !== html) { el._h = html; el.innerHTML = html; }
 }
 function say(msg) { P.say = msg; P.sayUntil = performance.now() + 2600; setTimeout(render, 2650); render(); }
@@ -195,7 +210,7 @@ function say(msg) { P.say = msg; P.sayUntil = performance.now() + 2600; setTimeo
 function show(name, kind, does) { $('#ro-name').textContent = name; $('#ro-kind').textContent = kind; $('#ro-does').textContent = does; }
 async function describe(x, y) {
   const h = await panel.help(x, y);
-  if (!h) { show(`PAD ${x + 1}, ${y + 1}`, PAGES[P.page] + ' PAGE', P.page === 5 ? "Plinky's own save and load page is drawn here on the device. On this page use SAVE PROJECT and LOAD PROJECT below." : 'Not used on this page.'); return; }
+  if (!h) { show(`PAD ${x + 1}, ${y + 1}`, PAGES[P.page] + ' PAGE', P.page === SAVE_PAGE ? "Plinky's own save and load page is drawn here on the device. On this page use SAVE PROJECT and LOAD PROJECT below." : 'Not used on this page.'); return; }
   const [name, kind, does] = h.split('\n');
   show(name, kind, does);
 }
@@ -247,10 +262,10 @@ pads.addEventListener('contextmenu', (e) => e.preventDefault());
 
 /* Plinky's side buttons: tempo on the left, pages on the right */
 const SIDE = {
-  'tempo-up': ['TEMPO UP', 'Plinky’s top left side button: tempo up (hold to repeat). CLATTER 12 follows Plinky’s tempo and transport.', () => panel.setTempo(clamp(P.tempo + 1, 30, 300))],
+  'tempo-up': ['TEMPO UP', 'Plinky’s top left side button: tempo up (hold to repeat). CLATTER 12 follows Plinky’s tempo and transport. On the grid: TMP (row 15) taps the tempo, and held opens the tempo overlay.', () => panel.setTempo(clamp(P.tempo + 1, 30, 300))],
   'tempo-down': ['TEMPO DOWN', 'Plinky’s bottom left side button: tempo down (hold to repeat).', () => panel.setTempo(clamp(P.tempo - 1, 30, 300))],
-  'page-up': ['PAGE UP', 'Plinky’s right side buttons scroll through the panel’s pages (SEQ, SOUND, GEN, MIX, FX, SAVE). On the device, up from SEQ opens the DSP load page.', () => panel.setPage(clamp(P.page - 1, 0, 5))],
-  'page-down': ['PAGE DOWN', 'Plinky’s right side buttons scroll through the panel’s pages. Row 15’s first six pads jump straight to one.', () => panel.setPage(clamp(P.page + 1, 0, 5))],
+  'page-up': ['PAGE UP', 'Plinky’s right side buttons scroll through the panel’s pages (SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT, SAVE). On the device, up from SEQ opens the DSP load page.', () => panel.setPage(clamp(P.page - 1, 0, LAST_PAGE))],
+  'page-down': ['PAGE DOWN', 'Plinky’s right side buttons scroll through the panel’s pages. Row 15’s first eight pads jump straight to one.', () => panel.setPage(clamp(P.page + 1, 0, LAST_PAGE))],
 };
 for (const id in SIDE) {
   const b = $('#' + id); let t1, t2;
