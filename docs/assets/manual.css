@@ -1,0 +1,134 @@
+/* CLATTER 12's manual (docs/manual/, written by tools/make_manual.py). On top of site.css: the same
+   black desktop, frames, slanted tabs, dither and one amber; the crib sheets are paper, like the
+   project page's readout. Print rules make the PDFs (tools/make_manual_pdf.mjs). */
+
+.hero .title { font-size: clamp(44px, 12vw, 150px); }
+
+/* contents */
+.toc { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 14px 16px; }
+.toc a { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; height: 100%; padding: 12px 14px; border: var(--frame) solid var(--ink); background: var(--panel); text-decoration: none; box-shadow: 4px 4px 0 var(--ink); transition: transform .06s steps(2), box-shadow .06s steps(2); }
+.toc a:hover { background: var(--ink); color: #000; }
+.toc a:hover span, .toc a:hover i { color: #000; }
+.toc a:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
+.toc span { grid-row: 1 / 3; color: var(--amber); font: 400 22px/1.1 var(--pixel); }
+.toc b { font: 400 16px/1.3 var(--pixel); font-weight: 400; }
+.toc i { font-style: normal; color: var(--dim); font-size: 14px; line-height: 1.35; }
+
+/* chapters */
+.chip-tag { display: inline-block; margin: -6px 0 22px; padding: 3px 9px; background: var(--amber); color: #000; font: 400 13px/1.35 var(--pixel); }
+.lead-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 560px); gap: 22px 34px; align-items: start; }
+.lead-text { max-width: 62ch; font-size: clamp(17px, 1.6vw, 19px); }
+.jump { margin-top: 18px !important; font: 400 14px/1.4 var(--pixel); }
+.figs { display: grid; gap: 18px; }
+.shot { border: var(--frame) solid var(--ink); background: #000; }
+.shot img { display: block; width: 100%; height: auto; }
+.shot figcaption { padding: 6px 12px; border-top: var(--frame) solid var(--ink); background: var(--ink); color: #000; font: 400 13px/1.3 var(--pixel); }
+.sub-tab { margin: 40px 0 0; }
+h4 { margin: 26px 0 10px; color: var(--amber); font: 400 15px/1.3 var(--pixel); }
+.notes { max-width: 78ch; margin-top: 18px; }
+.notes p + p, .notes .scroll + p { margin-top: .8em; }
+
+/* the reference tables */
+table.ref, table.gest, table.kinds { border-top: var(--frame) solid var(--ink); }
+table.ref thead th, table.gest thead th, table.kinds thead th { padding-top: 10px; }
+table.ref td.rc { font: 400 13px/1.5 var(--pixel); color: var(--amber); white-space: nowrap; padding-right: 18px; }
+table.ref tbody th { min-width: 150px; white-space: normal; font: 400 14px/1.35 var(--pixel); }
+table.ref tbody th .kind, .kinds .kind { display: block; margin-top: 4px; color: var(--dim); font: 400 10.5px/1.3 var(--pixel); letter-spacing: .02em; }
+table.ref tbody td:last-child { min-width: 260px; }
+table.gest tbody th { white-space: normal; min-width: 170px; }
+table.kinds tbody th { display: flex; gap: 12px; align-items: center; font: 400 13px/1.35 var(--pixel); white-space: normal; min-width: 210px; }
+
+/* kinds of control: four pads that look like the kind */
+.sw { display: inline-grid; grid-template-columns: repeat(4, 12px); gap: 3px; flex: none; }
+.sw i { width: 12px; height: 12px; border-radius: 3px; background: #1a1a1a; }
+.sw.mom i { background: #2b1700; } .sw.mom i:nth-child(2) { background: var(--amber); box-shadow: 0 0 8px rgba(255,154,31,.6); }
+.sw.tog i:nth-child(odd) { background: #35d435; } .sw.tog i:nth-child(even) { background: #0b260b; }
+.sw.sel i { background: #102c46; } .sw.sel i:nth-child(3) { background: #0090ff; box-shadow: 0 0 8px rgba(0,144,255,.6); }
+.sw.cont i { background: #ff8a00; } .sw.cont i:nth-child(3) { background: #3a2000; } .sw.cont i:nth-child(4) { background: #5a3a10; }
+.sw.destr i { background: #3a0606; } .sw.destr i:first-child { background: #c01818; }
+.sw.show i { background: #3a3a36; } .sw.show i:first-child { background: #8a8a86; }
+
+/* row 15 */
+.row15 { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 5px; max-width: 900px; margin: 18px 0 18px; padding: 10px; border-radius: 10px; background: #050505; box-shadow: 0 0 0 1px #1a1a1a, 0 0 0 var(--frame) #34373a; }
+.row15 span { display: grid; place-items: center; aspect-ratio: 1; border-radius: 22%; font: 400 clamp(6px, 1.3vw, 11px)/1 var(--pixel); color: rgba(255,255,255,.75); }
+.r-pg { background: #2a2a28; } .r-pg:first-child { background: #b8b8b2; color: #000 !important; }
+.r-tmp { background: #6a3038; } .r-own { background: #141414; } .r-und { background: #8a8a86; color: #000 !important; }
+.r-red { background: #2a2a28; } .r-stp { background: #4a0808; } .r-ply { background: #0c5a0c; }
+.hue { display: inline-flex; align-items: center; gap: 5px; font: 400 12px/1.6 var(--pixel); white-space: nowrap; }
+.hue::before { content: ''; width: 10px; height: 10px; border-radius: 2px; background: var(--h); }
+
+/* crib sheets: paper, like the readout */
+.crib { margin-top: 40px; border: var(--frame) solid var(--ink); background: var(--paper); color: var(--paper-ink); box-shadow: 6px 6px 0 #5c5c58; break-inside: avoid; }
+.crib-head { display: flex; gap: 12px; align-items: baseline; padding: 9px 16px; background: var(--paper-ink); color: var(--paper); font: 400 24px/1.2 var(--pixel); }
+.crib-head span { color: var(--amber); font-size: 14px; }
+.crib-body { display: grid; grid-template-columns: minmax(0, 440px) minmax(0, 1fr); gap: 18px 26px; padding: 18px; align-items: start; }
+.padmap { margin: 0; }
+.padmap .map { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); grid-template-rows: repeat(16, minmax(0, 1fr)); gap: 2px; aspect-ratio: 1; padding: 8px; border-radius: 8px; background: #050505; box-shadow: 0 0 0 4px #34373a; }
+.padmap i { border-radius: 3px; background: #161616; }
+.padmap b { display: flex; align-items: center; justify-content: center; min-width: 0; overflow: hidden; padding: 1px; border-radius: 3px; font: 400 clamp(6px, 1.05vw, 8.5px)/1.05 var(--pixel); text-align: center; letter-spacing: 0; }
+.padmap figcaption { margin-top: 10px; font-size: 13.5px; color: #3c3c38; }
+.crib-sub { margin: 0 0 6px !important; font: 400 13px/1.3 var(--pixel); }
+.crib-moves ul { list-style: none; padding: 0; margin: 0 0 18px; }
+.crib-moves li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 14px; padding: 7px 0; border-bottom: 1px dashed #9a9a94; font-size: 15px; line-height: 1.35; }
+.crib-moves li b { font-weight: 600; }
+.crib-always { font-size: 14.5px; color: #26261f; }
+.crib a { color: var(--paper-ink); }
+
+@media (max-width: 980px) {
+  .lead-grid, .crib-body { grid-template-columns: minmax(0, 1fr); }
+  .figs { max-width: 620px; }
+  .padmap { max-width: 460px; }
+}
+@media (max-width: 680px) {
+  .crib-moves li { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .crib-head { font-size: 19px; }
+}
+
+/* ---------------------------------------------------------------- print: the PDFs */
+@page { size: A4; margin: 11mm 0; background: #000; }
+@page :first { margin-top: 0; }
+@media print {
+  html, body { background: #000 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font-size: 11.5pt; }
+  .skip, .top nav, .cta, .jump, .strip a { display: none !important; }
+  .top { padding: 12mm 14mm 4mm; }
+  .strip { padding: 3mm 14mm; }
+  main > section, .hero { max-width: none; padding: 8mm 14mm 0; }
+  main > section:last-of-type { padding-bottom: 10mm; }
+  .chapter { break-before: page; padding-top: 3mm !important; }
+  .section { font-size: 26pt; }
+  .hero .title { font-size: 92pt; }
+  .lead-grid { grid-template-columns: minmax(0, 1fr) 82mm; gap: 6mm; }
+  .lead-text { font-size: 11.5pt; }
+  .figs.two { grid-template-columns: 1fr; gap: 4mm; }
+  .figs.two .shot img { max-height: 70mm; object-fit: contain; }
+  table { font-size: 9.5pt; }
+  th, td { padding: 4.5px 10px 4.5px 0; }
+  table.ref td.rc { font-size: 9pt; }
+  table.ref tbody th { font-size: 9.5pt; }
+  tr, .toc li, .crib, figure { break-inside: avoid; }
+  h3, h4 { break-after: avoid; }
+  .toc { grid-template-columns: repeat(3, 1fr); }
+  .toc a { box-shadow: none; }
+  .crib { break-before: page; margin-top: 4mm; box-shadow: none; }
+  .crib-body { grid-template-columns: 112mm 1fr; padding: 6mm; }
+  .padmap b { font-size: 7pt; }
+  .foot { margin-top: 0; padding: 6mm 14mm 12mm; break-inside: avoid; }
+  a { text-decoration: none; }
+}
+
+/* the crib-sheets PDF: only the sheets, one to a page, larger */
+body.cribs-only .strip, body.cribs-only .top, body.cribs-only .hero, body.cribs-only #contents, body.cribs-only #start,
+body.cribs-only #grid, body.cribs-only .foot, body.cribs-only .chapter > :not(.crib) { display: none !important; }
+body.cribs-only .chapter { padding: 0 !important; break-before: auto; }
+body.cribs-only .crib { margin: 0; break-before: auto; break-after: page; min-height: 294mm; border: 0; display: flex; flex-direction: column; }
+body.cribs-only .crib-head { padding: 10mm 14mm 6mm; font-size: 30pt; }
+body.cribs-only .crib-body { grid-template-columns: 1fr; padding: 8mm 14mm 10mm; gap: 8mm; }
+body.cribs-only .padmap { width: 150mm; margin: 0 auto; }
+body.cribs-only .padmap b { font-size: 9pt; }
+body.cribs-only .crib-moves ul { columns: 2; column-gap: 10mm; }
+body.cribs-only .crib-moves li { break-inside: avoid; font-size: 11.5pt; }
+@media print { body.cribs-only, body.cribs-only main { background: var(--paper) !important; } }
+@page crib { margin: 0; background: #eef2ea; }
+body.cribs-only .crib { page: crib; }
+body.cribs-only .chapter:not(:has(.crib)) { display: none; }

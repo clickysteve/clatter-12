@@ -77,6 +77,7 @@ Tests and what they do and do not show: [TESTING.md](TESTING.md).
 - [FEASIBILITY.md](FEASIBILITY.md): how Plinky panels work, resources, LXR portability, obstacles
 - [ARCHITECTURE.md](ARCHITECTURE.md): layers, threads, signal path, memory, the amalgamation
 - [docs/DESIGN.md](docs/DESIGN.md): the 16 × 16 interface
+- [The manual](https://clickysteve.github.io/clatter-12/manual/) (`docs/manual/`, `make manual`): every page and pad, a crib sheet per page, and PDFs of both
 - [BUILDING.md](BUILDING.md), [TESTING.md](TESTING.md), [ROADMAP.md](ROADMAP.md)
 - [NOTICE.md](NOTICE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): licences and attribution
 

@@ -33,7 +33,7 @@ CXXFLAGS_HOST := -std=gnu++17 -O2 -ffp-contract=off -Wall -Wno-unused-function -
 M33_FLAGS := -std=gnu++17 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 \
 	-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wno-psabi
 
-.PHONY: all panel test m33 m33-bench m33-profile golden bench pocket-test wasm test-wasm site-serve clean
+.PHONY: all panel test m33 m33-bench m33-profile golden bench pocket-test wasm test-wasm site-serve manual manual-shots clean
 all: panel test
 
 $(BUILD)/c12_engine.inc $(BUILD)/c12_engine_c.c: $(GEN_DEPS)
@@ -146,6 +146,14 @@ $(WASM_PANEL): $(BUILD)/wasm/panel.o $(BUILD)/wasm/sim.o $(BUILD)/wasm/libc.o $(
 wasm: $(WASM_PANEL)
 test-wasm: $(WASM_PANEL)
 	node tests/test_wasm.mjs
+# The manual (docs/manual): HTML from tools/make_manual.py, PDFs (and, with manual-shots, the
+# screenshots of each page) from the panel running in Chromium via Playwright.
+manual:
+	$(PY) tools/make_manual.py
+	node tools/make_manual_pdf.mjs
+manual-shots:
+	node tools/make_manual_pdf.mjs --shots
+
 site-serve:
 	$(PY) -m http.server 8000 --directory docs
 
