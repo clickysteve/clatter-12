@@ -40,7 +40,6 @@ _Static_assert(C12_TRACKS == POCKET_SEQ_TRACKS, "tracks");
 
 static struct c12_resampler rs;
 static float lxrF[C12_LXR_BLOCK * 2];
-static int32_t lxrQ23[C12_LXR_BLOCK * 2];
 static float outF[128 * 2];
 static volatile struct c12_engine_stats st;
 
@@ -86,6 +85,10 @@ static uint32_t sendWrite, sendRead, sendFrac;
 static int32_t sendOut[2][128];
 static uint8_t sendsActive;
 static uint32_t outRate;
+/* the LXR block in stages (c12_engine_render) */
+enum { STG_HEAD, STG_V0, STG_V1, STG_V2, STG_V3, STG_V4, STG_V5, STG_MIX, STG_SPACE, STG_MASTER, STG_N };
+static uint8_t lxrStage;    /* the next stage of the LXR block under way (STG_HEAD: none under way) */
+static uint8_t spreadOn = 1;
 
 /* profile */
 static c12_clock_fn clockFn;
@@ -891,21 +894,47 @@ void c12_fx_set(int fx, int value)
 	fxSerial++;
 }
 
-/* audio context, at a block start, when anything moved: the LXR FX's own setters */
+/* What fx_apply last applied (audio context): each group of setters runs again only when one of its
+ * own values moved. The setters are pure (they store values and coefficients worked out from them),
+ * so skipping an unchanged group leaves exactly the state running it would. 0xff: never applied. */
+static uint8_t fxSeen[C12_FX_PARAMS + 2];
+#define FX_SEEN_FREEZE_D C12_FX_PARAMS
+#define FX_SEEN_FREEZE_R (C12_FX_PARAMS + 1)
+static int fx_moved(int lo, int hi)
+{
+	int moved = 0;
+	for (int f = lo; f <= hi; f++)
+		if (fxSeen[f] != fxValue[f])
+		{
+			fxSeen[f] = fxValue[f];
+			moved = 1;
+		}
+	return moved;
+}
+
+/* audio context, at an LXR block start, when anything moved: the LXR FX's own setters (the
+ * compressor's are double-precision exp), CLATTER 12's bits and limiter, the delay and reverb. A
+ * tempo change alone only moves the delay time (c12_space_set_tempo). */
 static void fx_apply(void)
 {
 	const float k = 1.f / 127.f;
-	fxDrive.distortionType = fxValue[C12_FX_DRIVE_TYPE];
-	Distortion_setDrive(&fxDrive, fxValue[C12_FX_DRIVE_AMOUNT] * k);
-	Distortion_setParam1(&fxDrive, fxValue[C12_FX_DRIVE_AMOUNT] * k);
-	Distortion_setParam2(&fxDrive, fxValue[C12_FX_DRIVE_TONE] * k);
-	Distortion_setParam3(&fxDrive, fxValue[C12_FX_DRIVE_LEVEL] * k);
-	Ringmod_setFreq(&fxRing, fxValue[C12_FX_RING_FREQ] * k);
-	Compressor_setTreshold(&fxComp, fxValue[C12_FX_COMP_THRESH] * k);
-	Compressor_setRatio(&fxComp, fxValue[C12_FX_COMP_RATIO]);
-	Compressor_setAttack(&fxComp, fxValue[C12_FX_COMP_ATTACK] * k);
-	Compressor_setRelease(&fxComp, fxValue[C12_FX_COMP_RELEASE] * k);
-	Compressor_setGain(&fxComp, fxValue[C12_FX_COMP_GAIN] * k);
+	if (fx_moved(C12_FX_DRIVE_TYPE, C12_FX_DRIVE_LEVEL))
+	{
+		fxDrive.distortionType = fxValue[C12_FX_DRIVE_TYPE];
+		Distortion_setDrive(&fxDrive, fxValue[C12_FX_DRIVE_AMOUNT] * k);
+		Distortion_setParam1(&fxDrive, fxValue[C12_FX_DRIVE_AMOUNT] * k);
+		Distortion_setParam2(&fxDrive, fxValue[C12_FX_DRIVE_TONE] * k);
+		Distortion_setParam3(&fxDrive, fxValue[C12_FX_DRIVE_LEVEL] * k);
+	}
+	if (fx_moved(C12_FX_RING_FREQ, C12_FX_RING_FREQ)) Ringmod_setFreq(&fxRing, fxValue[C12_FX_RING_FREQ] * k);
+	if (fx_moved(C12_FX_COMP_THRESH, C12_FX_COMP_GAIN))
+	{
+		Compressor_setTreshold(&fxComp, fxValue[C12_FX_COMP_THRESH] * k);
+		Compressor_setRatio(&fxComp, fxValue[C12_FX_COMP_RATIO]);
+		Compressor_setAttack(&fxComp, fxValue[C12_FX_COMP_ATTACK] * k);
+		Compressor_setRelease(&fxComp, fxValue[C12_FX_COMP_RELEASE] * k);
+		Compressor_setGain(&fxComp, fxValue[C12_FX_COMP_GAIN] * k);
+	}
 	fxWet[0] = fxValue[C12_FX_DRIVE_WET] * 0.01f;
 	fxWet[1] = fxValue[C12_FX_RING_WET] * 0.01f;
 	fxWet[2] = fxValue[C12_FX_COMP_WET] * 0.01f;
@@ -913,20 +942,27 @@ static void fx_apply(void)
 	crushStep = bits >= 16u ? 0.f : (float)(1u << (16u - bits));
 	crushInv = crushStep > 0.f ? 1.f / crushStep : 0.f;
 	limiterOn = fxValue[C12_FX_LIMITER];
-	struct c12_space_params sp;
-	sp.delay_division = fxValue[C12_FX_DLY_TIME];
-	sp.delay_feedback = fxValue[C12_FX_DLY_FEEDBACK];
-	sp.delay_filter = fxValue[C12_FX_DLY_FILTER];
-	sp.delay_wet = fxValue[C12_FX_DLY_WET];
-	sp.delay_pingpong = fxValue[C12_FX_DLY_PINGPONG];
-	sp.verb_size = fxValue[C12_FX_VERB_SIZE];
-	sp.verb_decay = fxValue[C12_FX_VERB_DECAY];
-	sp.verb_damp = fxValue[C12_FX_VERB_DAMP];
-	sp.verb_wet = fxValue[C12_FX_VERB_WET];
-	sp.delay_freeze = pfFreezeD;
-	sp.verb_freeze = pfFreezeR;
-	spaceBpm = pocket_seq_tempo();
-	c12_space_set(&sp, spaceBpm);
+	const int tempo = pocket_seq_tempo();
+	const int spaceMoved = fx_moved(C12_FX_DLY_TIME, C12_FX_VERB_WET) | (fxSeen[FX_SEEN_FREEZE_D] != pfFreezeD) | (fxSeen[FX_SEEN_FREEZE_R] != pfFreezeR);
+	if (spaceMoved)
+	{
+		struct c12_space_params sp;
+		sp.delay_division = fxValue[C12_FX_DLY_TIME];
+		sp.delay_feedback = fxValue[C12_FX_DLY_FEEDBACK];
+		sp.delay_filter = fxValue[C12_FX_DLY_FILTER];
+		sp.delay_wet = fxValue[C12_FX_DLY_WET];
+		sp.delay_pingpong = fxValue[C12_FX_DLY_PINGPONG];
+		sp.verb_size = fxValue[C12_FX_VERB_SIZE];
+		sp.verb_decay = fxValue[C12_FX_VERB_DECAY];
+		sp.verb_damp = fxValue[C12_FX_VERB_DAMP];
+		sp.verb_wet = fxValue[C12_FX_VERB_WET];
+		sp.delay_freeze = fxSeen[FX_SEEN_FREEZE_D] = pfFreezeD;
+		sp.verb_freeze = fxSeen[FX_SEEN_FREEZE_R] = pfFreezeR;
+		c12_space_set(&sp, tempo);
+	}
+	else if (tempo != spaceBpm)
+		c12_space_set_tempo(tempo);
+	spaceBpm = tempo;
 	spaceOn = fxValue[C12_FX_SPACE_ENGINE] == 0;
 }
 
@@ -978,9 +1014,11 @@ int c12_engine_init(uint32_t out_rate, uint32_t seed)
 	Compressor_init(&fxComp);
 	for (int f = 0; f < C12_FX_PARAMS; f++) fxValue[f] = fxDefault[f];
 	kitTarget[POCKET_PAR_VOICE_DECIMATION_ALL] = fxDefault[C12_FX_RATE];
+	memset(fxSeen, 0xff, sizeof fxSeen);
 	fx_apply();
 	fxApplied = fxSerial;
 	memset(sendRing, 0, sizeof sendRing);
+	lxrStage = STG_HEAD;
 	sendWrite = 0;
 	sendRead = 0;
 	sendFrac = 0;
@@ -1026,10 +1064,15 @@ static int32_t busMixL[C12_LXR_BLOCK], busMixR[C12_LXR_BLOCK];
 static int32_t busL[C12_LXR_BLOCK], busR[C12_LXR_BLOCK];
 static float sendD[C12_LXR_BLOCK], sendR[C12_LXR_BLOCK];
 
-static IN_ITCM_RAM void mix_block(void)
+/* The mix of one LXR block, in three stages (the scheduler below may put a callback between them):
+ * the voices (levels, mutes, sends, meters), the delay and reverb, then the FX chain, the master,
+ * the limiter and the sends ring. What one stage leaves for the next: */
+static int mixAnySend, mixAnyDelay, mixAnyVerb, mixFxOn;
+
+static IN_ITCM_RAM void mix_voices(void)
 {
 	const int fxOn = fxWet[0] > 0.f || fxWet[1] > 0.f || fxWet[2] > 0.f;
-	int anySend = 0;
+	int anySend = 0, anyD = 0, anyR = 0;
 	float target[POCKET_LXR_VOICES], g0[POCKET_LXR_VOICES];
 	int neutral = !fxOn;
 	for (int v = 0; v < POCKET_LXR_VOICES; v++)
@@ -1040,15 +1083,19 @@ static IN_ITCM_RAM void mix_block(void)
 		gainNow[v] = target[v];
 		neutral &= g0[v] == 1.f && target[v] == 1.f;
 	}
-	/* The mixer at unity and no FX: Pocket's own mix of the block is this mix (its master gain is
-	   unity, c12_engine_init), unless it saturated, which this one does not. */
+	/* The mixer at unity and no FX: Pocket's own mix of the block (the six voices summed by its
+	   addVoice, in mixL/mixR) is this mix, unless it would saturate Pocket's Q23 stage, which this
+	   one does not. The first version read it back from pocket_lxr_render_q23's Q23 output at
+	   unity gain (c12_engine_init) without the DC blocker: the same values, (mixL << 8) >> 8, and
+	   the same test (Q23 full scale is reached exactly when |mixL| >= 32768); that stage is no
+	   longer run (lxr_stage). */
 	if (neutral)
 		for (int i = 0; i < C12_LXR_BLOCK && neutral; i++)
 		{
-			const int32_t a = lxrQ23[2 * i], b = lxrQ23[2 * i + 1];
-			neutral = a != POCKET_Q23_MAX && a != POCKET_Q23_MIN && b != POCKET_Q23_MAX && b != POCKET_Q23_MIN;
-			busMixL[i] = a >> 8;
-			busMixR[i] = b >> 8;
+			const int32_t a = mixL[i], b = mixR[i];
+			neutral = a > -32768 && a < 32768 && b > -32768 && b < 32768;
+			busMixL[i] = a;
+			busMixR[i] = b;
 		}
 	if (!neutral)
 		for (int i = 0; i < C12_LXR_BLOCK; i++) busMixL[i] = busMixR[i] = busL[i] = busR[i] = 0;
@@ -1094,6 +1141,8 @@ static IN_ITCM_RAM void mix_block(void)
 		}
 	sends:;
 		const unsigned d = (pfThrowD >> track & 1u) ? 127u : mixDelay[track], r = (pfThrowR >> track & 1u) ? 127u : mixReverb[track];
+		anyD |= d != 0;
+		anyR |= r != 0;
 		if (d | r)
 		{
 			if (!anySend)
@@ -1110,13 +1159,27 @@ static IN_ITCM_RAM void mix_block(void)
 			}
 		}
 	}
+	mixAnySend = anySend;
+	mixAnyDelay = anyD;
+	mixAnyVerb = anyR;
+	mixFxOn = fxOn;
+}
+
+static IN_ITCM_RAM void mix_space(void)
+{
 	/* CLATTER 12's delay and reverb: their returns join the mix before the master and the limiter */
 	if (spaceOn)
 	{
 		const uint32_t ts = now_us();
-		if (c12_space_process(sendD, sendR, anySend, busMixL, busMixR, C12_LXR_BLOCK)) st.space_blocks++;
+		if (c12_space_process(sendD, sendR, mixAnyDelay, mixAnyVerb, busMixL, busMixR, C12_LXR_BLOCK)) st.space_blocks++;
 		prof.space_us += now_us() - ts;
 	}
+}
+
+static IN_ITCM_RAM void mix_master(void)
+{
+	const int fxOn = mixFxOn;
+	int anySend = mixAnySend;
 	/* the routed voices through the FX chain, at the master gain Pocket's mix has */
 	if (fxOn)
 	{
@@ -1224,36 +1287,163 @@ const int32_t* c12_engine_send(int which)
 }
 
 
+/* ------------------------------------------------------------------ the LXR block in stages */
+/*
+ * One LXR block is pocket_lxr_render_q23's sequence of calls (pocket_lxr.c: drain, the block hook,
+ * renderBlock), here cut into stages where nothing depends on the time between them: the head
+ * (FX values applied, queued events, the block hook, modulation, LFOs, filter coefficients, each
+ * voice's asynchronous part), each of the six voices (its samples, its decimator, Pocket's addVoice),
+ * then CLATTER 12's mix in three stages. Each stage runs the same code as before, in the same order,
+ * so the audio is the same; Pocket's own Q23 output stage, which CLATTER 12 never used beyond the
+ * sum of the voices, is not run (mix_voices reads that sum itself).
+ *
+ * Why stages: 64 output frames at 32 kHz need 1.379 LXR blocks, so a callback renders one block or
+ * two, and the busiest callbacks (two blocks) cost far more than the average. With spreading on
+ * (the default), after making this callback's output the engine goes on with the next block's
+ * stages until the callback has done its average share of work: the next callback then has less to
+ * do. It never runs more than the next callback will need, so the output samples are the same
+ * samples; only control changes made between callbacks may reach the engine one LXR block (1.45 ms)
+ * later than without (c12_engine_set_spread). Weights are instruction counts per stage measured in
+ * QEMU (tests/m33/profile.c), in hundreds: they decide only where a callback stops, never what is
+ * computed.
+ */
+
+void c12_engine_set_spread(int on) { spreadOn = on ? 1 : 0; }
+
+static IN_ITCM_RAM unsigned stage_weight(unsigned s)
+{
+	static const uint8_t w[STG_N] = { 70, 144, 143, 143, 116, 141, 140, 60, 0, 40 };
+	unsigned x = w[s];
+	if (s == STG_SPACE)
+	{
+		const int b = spaceOn ? c12_space_busy() : 0;
+		x = 1u + (b & 1 ? 80u : 0u) + (b & 2 ? 77u : 0u);
+	}
+	if (s == STG_MASTER) x += (fxWet[0] > 0.f ? 112u : 0u) + (fxWet[1] > 0.f ? 58u : 0u) + (fxWet[2] > 0.f ? 190u : 0u);
+	return x;
+}
+
+static IN_ITCM_RAM void lxr_stage(unsigned s)
+{
+	switch (s)
+	{
+	case STG_HEAD:
+		if (fxApplied != fxSerial || spaceBpm != pocket_seq_tempo())
+		{
+			fxApplied = fxSerial;
+			__atomic_thread_fence(__ATOMIC_SEQ_CST);
+			fx_apply();
+		}
+		drain();
+		if (blockHook) blockHook();
+		/* renderBlock, up to the voices */
+		modNode_resetTargets();
+		modNode_reassignVeloMod();
+		lfo_dispatchNextValue(&voiceArray[0].lfo);
+		lfo_dispatchNextValue(&voiceArray[1].lfo);
+		lfo_dispatchNextValue(&voiceArray[2].lfo);
+		lfo_dispatchNextValue(&snareVoice.lfo);
+		lfo_dispatchNextValue(&cymbalVoice.lfo);
+		lfo_dispatchNextValue(&hatVoice.lfo);
+		SVF_recalcFreq(&voiceArray[0].filter);
+		SVF_recalcFreq(&voiceArray[1].filter);
+		SVF_recalcFreq(&voiceArray[2].filter);
+		SVF_recalcFreq(&snareVoice.filter);
+		SVF_recalcFreq(&cymbalVoice.filter);
+		SVF_recalcFreq(&hatVoice.filter);
+		calcDrumVoiceAsync(0);
+		calcDrumVoiceAsync(1);
+		calcDrumVoiceAsync(2);
+		Snare_calcAsync();
+		Cymbal_calcAsync();
+		HiHat_calcAsync();
+		for (int i = 0; i < POCKET_LXR_BLOCK; i++) mixL[i] = mixR[i] = 0;
+		break;
+	case STG_V0:
+	case STG_V1:
+	case STG_V2:
+	{
+		const uint8_t v = (uint8_t)(s - STG_V0);
+		calcDrumVoiceSyncBlock(v, voiceData[v], POCKET_LXR_BLOCK);
+		mixer_decimateBlock(v, voiceData[v]);
+		addVoice(v, voiceArray[v].triggeredPanL, voiceArray[v].triggeredPanR);
+		break;
+	}
+	case STG_V3:
+		Snare_calcSyncBlock(voiceData[3], POCKET_LXR_BLOCK);
+		mixer_decimateBlock(3, voiceData[3]);
+		addVoice(3, snareVoice.triggeredPanL, snareVoice.triggeredPanR);
+		break;
+	case STG_V4:
+		Cymbal_calcSyncBlock(voiceData[4], POCKET_LXR_BLOCK);
+		mixer_decimateBlock(4, voiceData[4]);
+		addVoice(4, cymbalVoice.triggeredPanL, cymbalVoice.triggeredPanR);
+		break;
+	case STG_V5:
+		HiHat_calcSyncBlock(voiceData[5], POCKET_LXR_BLOCK);
+		mixer_decimateBlock(5, voiceData[5]);
+		addVoice(5, hatVoice.triggeredPanL, hatVoice.triggeredPanR);
+		break;
+	case STG_MIX:
+		stats.blocks++;
+		mix_voices();
+		break;
+	case STG_SPACE:
+		mix_space();
+		break;
+	default:
+		mix_master();
+		c12_rs_push(&rs, lxrF, C12_LXR_BLOCK);
+		break;
+	}
+}
+
+/* per render: what the stages took (profile: one clock reading a stage, each stage's time from the
+ * end of the one before) and how much was done */
+struct render_work {
+	uint32_t lxr_us, mix_us, t;
+	unsigned weight, blocks;
+};
+
+static IN_ITCM_RAM void run_stage(struct render_work* w)
+{
+	const unsigned s = lxrStage;
+	lxr_stage(s);
+	if (clockFn)
+	{
+		const uint32_t t = now_us();
+		if (s < STG_MIX) w->lxr_us += t - w->t;
+		else w->mix_us += t - w->t;
+		w->t = t;
+	}
+	w->weight += stage_weight(s);
+	if (s + 1u < STG_N)
+		lxrStage = (uint8_t)(s + 1u);
+	else
+	{
+		lxrStage = STG_HEAD;
+		w->blocks++;
+	}
+}
+
 IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 {
 	if (frames > 128) frames = 128;
 	const uint32_t t0 = now_us();
-	uint32_t tl = 0, tm = 0;
-	if (fxApplied != fxSerial || spaceBpm != pocket_seq_tempo())
+	struct render_work w = { 0, 0, t0, 0, 0 };
+	/* this callback's output: every block it needs, finished */
+	const uint32_t need = c12_rs_needed(&rs, frames);
+	while (rs.count < need)
 	{
-		fxApplied = fxSerial;
-		__atomic_thread_fence(__ATOMIC_SEQ_CST);
-		fx_apply();
-	}
-	unsigned rendered = 0;
-	while (rs.count < c12_rs_needed(&rs, frames))
-	{
-		if (c12_rs_room(&rs) < C12_LXR_BLOCK)
+		if (lxrStage == STG_HEAD && c12_rs_room(&rs) < C12_LXR_BLOCK)
 		{
 			st.underruns++;
 			memset(out_lr, 0, frames * 2 * sizeof(int16_t));
 			return;
 		}
-		const uint32_t a = now_us();
-		/* Pocket's mix of the block is made and not used: mix_block makes it again, with more */
-		pocket_lxr_render_q23(lxrQ23, C12_LXR_BLOCK, 0);
-		const uint32_t b = now_us();
-		mix_block();
-		tl += b - a;
-		tm += now_us() - b;
-		c12_rs_push(&rs, lxrF, C12_LXR_BLOCK);
-		rendered++;
+		run_stage(&w);
 	}
+	const unsigned rendered = w.blocks;
 	c12_rs_process(&rs, outF, frames);
 	uint32_t clipped = 0;
 	for (unsigned i = 0; i < frames * 2; i++)
@@ -1276,17 +1466,32 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 		sendRead = sendWrite - lag;
 		sendFrac = 0;
 	}
+	/* spreading: on with the next block, up to this callback's average share of the work, and
+	   never past what the next callback needs */
+	if (spreadOn)
+	{
+		const uint32_t next = c12_rs_needed(&rs, frames);
+		unsigned block = 0;
+		for (unsigned k = 0; k < STG_N; k++) block += stage_weight(k);
+		const unsigned share = (unsigned)((uint64_t)block * frames * rs.in_rate / ((uint64_t)rs.out_rate * C12_LXR_BLOCK));
+		w.t = now_us();
+		while (w.weight < share && rs.count < next)
+		{
+			if (lxrStage == STG_HEAD && c12_rs_room(&rs) < C12_LXR_BLOCK) break;
+			run_stage(&w);
+		}
+	}
 	st.out_blocks++;
-	st.lxr_blocks += rendered;
+	st.lxr_blocks += w.blocks;
 	if (rendered > st.lxr_max_per_out) st.lxr_max_per_out = rendered;
 	st.clipped += clipped;
 	if (clockFn)
 	{
 		const uint32_t total = now_us() - t0;
 		prof.calls++;
-		prof.lxr_us += tl;
-		prof.mix_us += tm;
-		prof.rs_us += total - tl - tm;
+		prof.lxr_us += w.lxr_us;
+		prof.mix_us += w.mix_us;
+		prof.rs_us += total - w.lxr_us - w.mix_us;
 		if (total > prof.total_max_us) prof.total_max_us = total;
 	}
 }

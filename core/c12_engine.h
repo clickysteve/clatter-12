@@ -67,6 +67,13 @@ int c12_engine_init(uint32_t out_rate, uint32_t seed);
  * 128 (tests/test_engine.c: the audio does not depend on the block size). */
 void c12_engine_render(int16_t* out_lr, unsigned frames);
 
+/* Spreading (on by default): after making a callback's output, the engine starts on the LXR
+ * blocks the next callback will need, up to the callback's average share of the work, so that a
+ * callback needing two LXR blocks no longer does them both. The output samples are the same; a
+ * control change made between callbacks may reach the engine one LXR block (1.45 ms) later. Off:
+ * the first version's timing exactly (every block rendered in the callback that needs it). */
+void c12_engine_set_spread(int on);
+
 /* Either context: copies of the counters (single words, read without locking). */
 void c12_engine_stats_read(struct c12_engine_stats* out);
 

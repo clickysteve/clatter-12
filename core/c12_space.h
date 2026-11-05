@@ -14,8 +14,9 @@
  *           size, decay (T60 0.3-8 s), damping (a low-pass in each line), wet, freeze.
  *
  * The delay runs at the LXR's 44 140 Hz; the reverb at half that (22 070 Hz), as Plinky's own
- * reverb runs at half its rate. Their lines are 16-bit, in memory the caller binds
- * (C12_SPACE_BYTES, 282 KB; PSRAM on the Plinky 12).
+ * reverb runs at half its rate. Their lines are 16-bit, in memory the caller binds: the delay's
+ * 256 KB (PSRAM on the Plinky 12, read and written as one sequential stream), the reverb's 26 KB
+ * (the panel's SRAM on the Plinky 12: six streams, scattered).
  * Audio context only, except c12_space_bind (control context, before the audio context starts).
  * When neither has input or anything left in its lines, c12_space_process returns at once.
  */
@@ -31,7 +32,9 @@ extern "C" {
 #define C12_SPACE_DELAY_LINE 65536u   /* samples a channel at 44 140 Hz: 1.48 s */
 #define C12_SPACE_VERB_LINE 3072u     /* each of the four network lines */
 #define C12_SPACE_AP_LINE 512u        /* each of the two diffusers */
-#define C12_SPACE_BYTES ((2u * C12_SPACE_DELAY_LINE + 4u * C12_SPACE_VERB_LINE + 2u * C12_SPACE_AP_LINE) * 2u)
+#define C12_SPACE_DELAY_BYTES (C12_SPACE_DELAY_LINE * 4u)                              /* 256 KB: PSRAM */
+#define C12_SPACE_VERB_BYTES ((4u * C12_SPACE_VERB_LINE + 2u * C12_SPACE_AP_LINE) * 2u) /* 26 KB: SRAM */
+#define C12_SPACE_BYTES (C12_SPACE_DELAY_BYTES + C12_SPACE_VERB_BYTES)
 
 /* Delay divisions, in sixteenths x 6 (24 ppqn ticks): 1/32 1/16T 1/16 1/8T 1/16D 1/8 1/4T 1/8D 1/4 1/2T 1/4D 1/2 */
 #define C12_DELAY_DIVISIONS 12
@@ -50,14 +53,25 @@ struct c12_space_params {
 	uint8_t delay_freeze, verb_freeze;
 };
 
-/* `mem` C12_SPACE_BYTES, 2-byte aligned, or NULL (then the effects are silent). */
+/* The delay's lines (C12_SPACE_DELAY_BYTES) and the reverb's (C12_SPACE_VERB_BYTES), each 4-byte
+ * aligned, or NULL (then the effects are silent). The delay is read and written as one sequential
+ * stream (PSRAM is fine); the reverb as six scattered ones (keep it in SRAM). */
+void c12_space_bind2(void* delay, void* verb);
+/* Both in one block of C12_SPACE_BYTES, 4-byte aligned (the delay's first). */
 void c12_space_bind(void* mem);
 int c12_space_bound(void);
 /* Audio context. New parameters (from the control context's bytes), at a block start. */
 void c12_space_set(const struct c12_space_params* p, int bpm);
+/* Audio context. A new tempo with the parameters unchanged (the delay time follows it). */
+void c12_space_set_tempo(int bpm);
 /* Audio context. `frames` (even) samples of the delay and reverb sends at 44 140 Hz in, the wet
- * stereo out, added to outL/outR (the mixer's 16-bit-scale integer bus). Returns 1 if it ran. */
-int c12_space_process(const float* send_delay, const float* send_verb, int any_send, int32_t* outL, int32_t* outR, unsigned frames);
+ * stereo out, added to outL/outR (the mixer's 16-bit-scale integer bus). `any_delay`/`any_verb`:
+ * whether anything is sent to each this block (when either is set both buffers are read). Each
+ * effect with no input and only zeros in its lines does nothing. Returns 1 if either ran. */
+int c12_space_process(const float* send_delay, const float* send_verb, int any_delay, int any_verb, int32_t* outL, int32_t* outR,
+                      unsigned frames);
+/* Which ran in the last c12_space_process (bit 0 the delay, bit 1 the reverb). */
+int c12_space_busy(void);
 /* Largest |wet| of the last blocks (0..32767), delay and reverb, for the meters; reset on read. */
 void c12_space_peaks(uint16_t* delay, uint16_t* verb);
 /* Clear the lines (control context, while the audio context is not running). */

@@ -24,7 +24,7 @@
 #define S16 (300u * C12_LXR_RATE) /* a straight sixteenth in Pocket's phase units */
 
 static uint32_t tableMem[C12_TABLE_BYTES / 4];
-static int16_t spaceMem[C12_SPACE_BYTES / 2];
+static uint32_t spaceMem[C12_SPACE_BYTES / 4];
 static int16_t blockPcm[64 * 2];
 static struct c12_trigger_event logBuf[C12_TRIG_LOG];
 

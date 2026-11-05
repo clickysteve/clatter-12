@@ -17,7 +17,7 @@
 #define SYST_CVR (*(volatile uint32_t*)0xE000E018)
 
 static uint32_t tables[C12_TABLE_BYTES / 4];
-static int16_t space[C12_SPACE_BYTES / 2]; /* PSRAM on the Plinky: here plain RAM (a lower bound) */
+static uint32_t space[C12_SPACE_BYTES / 4]; /* PSRAM on the Plinky: here plain RAM (a lower bound) */
 static uint8_t kit[C12_KIT_PARAMS];
 static int16_t out[64 * 2];
 

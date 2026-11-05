@@ -35,7 +35,8 @@ MEM = {"memcpy", "memmove", "memset", "memcmp"}
 AUDIO_PATH = ["renderBlock", "mixer_calcNextSampleBlock", "slopeEg2_calc(", "SVF_calcBlockZDF",
               "SVF_calcBlockCheapZDF", "calcOnePoleAdaptiveVolume", "c12_engine_render", "c12_rs_process",
               "calcDrumVoiceSyncBlock", "Snare_calcSyncBlock", "Cymbal_calcSyncBlock", "HiHat_calcSyncBlock",
-              "pocket_lxr_render_q23", "pocket_seq_block"]
+              "pocket_lxr_render_q23", "pocket_seq_block", "lxr_stage", "run_stage", "mix_voices", "mix_space",
+              "mix_master", "c12_space_process", "c12_space_set_tempo", "fx_apply"]
 
 failed = False
 engine = open(sys.argv[1]).read()

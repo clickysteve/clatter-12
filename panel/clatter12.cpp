@@ -164,7 +164,7 @@ struct project_v1_t {
   uint8_t reserved[16];
   uint32_t crc;
 };
-static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay and reverb lines, after the tables' room
+static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay's lines, after the tables' room
 // REPEAT page: rates (row 4) and beat-repeat lengths (row 9), as c12 divisions
 static const uint8_t rep_rates[16] = {c12::c12x_div_4, c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_64, 0,
                                       c12::c12x_div_4t, c12::c12x_div_8t, c12::c12x_div_16t, c12::c12x_div_32t, 0,
@@ -286,6 +286,7 @@ struct clatter12 : panel_t {
   uint8_t fx_bank; // FX page: 0 SPACE, 1 COLOUR
 
   clatter12() {
+    memset(verb_lines, 0, sizeof(verb_lines));
     memset(press, 0, sizeof(press));
     sel_track = sel_step = -1;
     view_page = 0;
@@ -399,9 +400,10 @@ struct clatter12 : panel_t {
       return;
     }
     c12::c12_engine_set_clock(clock_us);
-    // CLATTER 12's delay and reverb lines (156 KB): PSRAM, after the room the tables may take
-    if (get_psram_size() >= (uint32_t)(C12_PSRAM_SPACE_OFFSET + c12::c12x_space_bytes))
-      c12::c12_space_bind((uint8_t *)get_psram_ptr() + C12_PSRAM_SPACE_OFFSET);
+    // CLATTER 12's delay lines (256 KB): PSRAM, after the room the tables may take; its reverb
+    // lines (26 KB): this object (verb_lines)
+    if (get_psram_size() >= (uint32_t)(C12_PSRAM_SPACE_OFFSET + c12::c12x_space_delay_bytes))
+      c12::c12_space_bind2((uint8_t *)get_psram_ptr() + C12_PSRAM_SPACE_OFFSET, verb_lines);
     else
       printf("clatter12: no PSRAM for the delay and reverb; they are silent\n");
     c12::c12_kit_design(kit, -1, 0, 50); // the LXR-02 firmware's init kit
@@ -1985,7 +1987,9 @@ struct clatter12 : panel_t {
   // refused (or lacks CLATTER 12's field) leaves everything as it was when the copy replaces it.
   bool on_prepare_staged_load(panel_t *staged, size_t panel_memory_size) override {
     if (staged && panel_memory_size >= sizeof(*this)) {
-      memcpy((void *)staged, (const void *)this, sizeof(*this));
+      // everything but the reverb lines (the last member; the staged object's are silent)
+      const size_t state = (size_t)((const uint8_t *)verb_lines - (const uint8_t *)this);
+      memcpy((void *)staged, (const void *)this, state);
       ((clatter12 *)staged)->load_pending = false;
     }
     return panel_t::on_prepare_staged_load(staged, panel_memory_size);
@@ -2152,4 +2156,11 @@ struct clatter12 : panel_t {
     draw_nav(page, now);
   }
 
+
+  // CLATTER 12's reverb lines (26 KB), in the panel's SRAM arena: the reverb reads them as six
+  // scattered streams, which PSRAM (behind the XIP cache) serves badly. Last in the object (declare nothing after it), and
+  // kept out of on_prepare_staged_load's copy: a load (Plinky copies the staged object over this
+  // one) leaves them as the staged object's constructor made them, silent, rather than putting
+  // back a snapshot of an older tail. Not saved. The delay's lines (256 KB) are in PSRAM.
+  alignas(4) int16_t verb_lines[c12::c12x_space_verb_bytes / 2];
 };

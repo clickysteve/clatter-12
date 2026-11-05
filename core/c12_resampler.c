@@ -11,6 +11,7 @@
 
 #define C12_RS_BETA 6.8f
 #define C12_RS_HALF (C12_RS_TAPS / 2)
+_Static_assert(C12_RS_TAPS % 4 == 0, "the window is applied four taps at a time");
 
 /* Zeroth-order modified Bessel function of the first kind, by its power series. */
 static float bessel_i0(float x)
@@ -74,37 +75,53 @@ void c12_rs_push(struct c12_resampler* rs, const float* lr, unsigned frames)
 	}
 }
 
+/* One output frame: the two neighbouring tabulated phases interpolated tap by tap, and the window
+ * applied to both channels in the same pass. The arithmetic is the first version's, operation for
+ * operation and in the same order (coefficient a + (b - a) * t, then one running sum per channel,
+ * tap 0 first), so the output is the same to the bit; it no longer stores the 32 interpolated
+ * coefficients and reads them back, and the taps are written out four at a time. */
+#define C12_RS_TAP(k)                                   \
+	do {                                                \
+		const float c = a[k] + (b[k] - a[k]) * t;       \
+		accl += c * l[k];                               \
+		accr += c * r[k];                               \
+	} while (0)
+
 IN_ITCM_RAM void c12_rs_process(struct c12_resampler* rs, float* out_lr, unsigned frames)
 {
-	/* not on the stack: Plinky panels are told to keep stack objects under about 128 bytes */
-	static float coef[C12_RS_TAPS];
+	const float scale = (float)C12_RS_PHASES / (float)rs->out_rate;
+	const uint32_t in_rate = rs->in_rate, out_rate = rs->out_rate;
+	uint32_t frac = rs->frac, pos = rs->pos;
 	for (unsigned n = 0; n < frames; n++)
 	{
 		/* phase: frac/out_rate in [0,1) mapped onto the table, interpolated between rows */
-		const float ph = (float)rs->frac * ((float)C12_RS_PHASES / (float)rs->out_rate);
+		const float ph = (float)frac * scale;
 		int row = (int)ph;
 		if (row >= C12_RS_PHASES) row = C12_RS_PHASES - 1;
 		const float t = ph - (float)row;
 		const float* a = rs->table[row];
 		const float* b = rs->table[row + 1];
-		for (int k = 0; k < C12_RS_TAPS; k++) coef[k] = a[k] + (b[k] - a[k]) * t;
-		const float* l = &rs->buf[0][rs->pos];
-		const float* r = &rs->buf[1][rs->pos];
+		const float* l = &rs->buf[0][pos];
+		const float* r = &rs->buf[1][pos];
 		float accl = 0.f, accr = 0.f;
-		for (int k = 0; k < C12_RS_TAPS; k++)
+		for (int k = 0; k < C12_RS_TAPS; k += 4)
 		{
-			accl += coef[k] * l[k];
-			accr += coef[k] * r[k];
+			C12_RS_TAP(k);
+			C12_RS_TAP(k + 1);
+			C12_RS_TAP(k + 2);
+			C12_RS_TAP(k + 3);
 		}
 		out_lr[2 * n] = accl;
 		out_lr[2 * n + 1] = accr;
-		rs->frac += rs->in_rate;
-		while (rs->frac >= rs->out_rate)
+		frac += in_rate;
+		while (frac >= out_rate)
 		{
-			rs->frac -= rs->out_rate;
-			rs->pos++;
+			frac -= out_rate;
+			pos++;
 		}
 	}
+	rs->frac = frac;
+	rs->pos = pos;
 	/* drop what no later output can reach */
 	const uint32_t keep = rs->count > rs->pos ? rs->count - rs->pos : 0;
 	if (rs->pos)

@@ -33,7 +33,7 @@ CXXFLAGS_HOST := -std=gnu++17 -O2 -ffp-contract=off -Wall -Wno-unused-function -
 M33_FLAGS := -std=gnu++17 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 \
 	-ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wno-psabi
 
-.PHONY: all panel test m33 m33-bench bench pocket-test wasm test-wasm site-serve clean
+.PHONY: all panel test m33 m33-bench m33-profile golden bench pocket-test wasm test-wasm site-serve clean
 all: panel test
 
 $(BUILD)/c12_engine.inc $(BUILD)/c12_engine_c.c: $(GEN_DEPS)
@@ -170,3 +170,19 @@ pocket-test:
 
 clean:
 	rm -rf $(BUILD)
+
+# Where the instructions go, stage by stage (QEMU, as m33-bench; an estimate, not a Plinky).
+$(BUILD)/m33_profile.elf: tests/m33/profile.c tests/m33/startup.c tests/m33/link.ld $(BUILD)/c12_engine_c.c
+	$(ARM_GCC) -std=gnu11 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 -ffunction-sections -fdata-sections -w \
+		-include stdint.h -include stddef.h -include string.h -include stdlib.h -include stdio.h -include math.h -include assert.h \
+		-DC12_LXR_CODE= -DC12_LXR_DATA= -Icore -I$(POCKET)/engine -I$(POCKET)/seq --specs=rdimon.specs -nostartfiles \
+		-T tests/m33/link.ld tests/m33/startup.c tests/m33/profile.c -lm -lrdimon -Wl,--gc-sections -o $@
+m33-profile: $(BUILD)/m33_profile.elf
+	$(QEMU_ARM) -M mps2-an505 -cpu cortex-m33 -nographic -semihosting -icount shift=0,align=off -kernel $<
+
+# Audio of fixed sessions as raw PCM, to compare two builds sample for sample (tools/compare_builds.sh).
+$(BUILD)/golden_render: tests/golden.c $(BUILD)/c12_unity.o
+	$(CC) $(TEST_CFLAGS) tests/golden.c $(BUILD)/c12_unity.o -lm -o $@
+golden: $(BUILD)/golden_render
+	@mkdir -p $(BUILD)/golden
+	$(BUILD)/golden_render $(BUILD)/golden
