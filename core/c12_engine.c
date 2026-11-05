@@ -1091,7 +1091,7 @@ static IN_ITCM_RAM void mix_voices(void)
 	   the same test (Q23 full scale is reached exactly when |mixL| >= 32768); that stage is no
 	   longer run (lxr_stage). */
 	if (neutral)
-		for (int i = 0; i < C12_LXR_BLOCK && neutral; i++)
+		for (unsigned i = 0; i < C12_LXR_BLOCK && neutral; i++)
 		{
 			const int32_t a = mixL[i], b = mixR[i];
 			neutral = a > -32768 && a < 32768 && b > -32768 && b < 32768;
@@ -1099,7 +1099,7 @@ static IN_ITCM_RAM void mix_voices(void)
 			busMixR[i] = b;
 		}
 	if (!neutral)
-		for (int i = 0; i < C12_LXR_BLOCK; i++) busMixL[i] = busMixR[i] = busL[i] = busR[i] = 0;
+		for (unsigned i = 0; i < C12_LXR_BLOCK; i++) busMixL[i] = busMixR[i] = busL[i] = busR[i] = 0;
 	for (int v = 0; v < POCKET_LXR_VOICES; v++)
 	{
 		float panL, panR;
@@ -1107,7 +1107,7 @@ static IN_ITCM_RAM void mix_voices(void)
 		const int track = v < POCKET_TRIG_CLOSED_HAT ? v : hatOwner;
 		/* the voice's loudest sample (every fourth), for the meters, before the level */
 		uint32_t pk = 0;
-		for (int i = 0; i < C12_LXR_BLOCK; i += 4)
+		for (unsigned i = 0; i < C12_LXR_BLOCK; i += 4)
 		{
 			const uint32_t a = (uint32_t)(data[i] < 0 ? -data[i] : data[i]);
 			if (a > pk) pk = a;
@@ -1121,7 +1121,7 @@ static IN_ITCM_RAM void mix_voices(void)
 		if (g0[v] == 1.f && target[v] == 1.f)
 		{
 			/* Pocket's addVoice exactly */
-			for (int i = 0; i < C12_LXR_BLOCK; i++)
+			for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 			{
 				oL[i] += (int16_t)(data[i] * panL);
 				oR[i] += (int16_t)(data[i] * panR);
@@ -1132,7 +1132,7 @@ static IN_ITCM_RAM void mix_voices(void)
 			/* a level change ramps over the block: no step, no click */
 			const float dg = (target[v] - g0[v]) * (1.f / C12_LXR_BLOCK);
 			float g = g0[v];
-			for (int i = 0; i < C12_LXR_BLOCK; i++)
+			for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 			{
 				g += dg;
 				oL[i] += (int32_t)(data[i] * panL * g);
@@ -1148,11 +1148,11 @@ static IN_ITCM_RAM void mix_voices(void)
 		{
 			if (!anySend)
 			{
-				for (int i = 0; i < C12_LXR_BLOCK; i++) sendD[i] = sendR[i] = 0.f;
+				for (unsigned i = 0; i < C12_LXR_BLOCK; i++) sendD[i] = sendR[i] = 0.f;
 				anySend = 1;
 			}
 			const float gd = target[v] * level_gain(d) * 0.5f, gr = target[v] * level_gain(r) * 0.5f;
-			for (int i = 0; i < C12_LXR_BLOCK; i++)
+			for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 			{
 				const float m = (float)data[i] * (panL + panR);
 				sendD[i] += m * gd;
@@ -1183,7 +1183,7 @@ static IN_ITCM_RAM void mix_fx(unsigned chunk)
 {
 	if (!mixFxOn) return;
 	if (chunk == 0)
-		for (int i = 0; i < C12_LXR_BLOCK; i++)
+		for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 		{
 			fxIn[2 * i] = sat16(mul_shift(busL[i], C12_MASTER_Q12, 12, 0));
 			fxIn[2 * i + 1] = sat16(mul_shift(busR[i], C12_MASTER_Q12, 12, 0));
@@ -1204,7 +1204,7 @@ static IN_ITCM_RAM void mix_master(void)
 	const float release = 0.99972f; /* about 80 ms at 44 140 Hz */
 	float mm = m0;
 	uint32_t peak = prof.peak, limited = 0;
-	for (int i = 0; i < C12_LXR_BLOCK; i++)
+	for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 	{
 		/* Pocket's master gain and DC blocker, to the bit (pocket_lxr.c), with 32-bit state: each
 		   multiply one SMULL on the Cortex-M33, where Pocket's 64 by 64 bits are a library call */
@@ -1258,7 +1258,7 @@ static IN_ITCM_RAM void mix_master(void)
 	prof.limited += limited;
 	/* the sends' ring (for Plinky's delay and reverb) */
 	if (spaceOn) anySend = 0;
-	for (int i = 0; i < C12_LXR_BLOCK; i++)
+	for (unsigned i = 0; i < C12_LXR_BLOCK; i++)
 	{
 		const uint32_t w = (sendWrite + (uint32_t)i) & (SEND_CAP - 1u);
 		sendRing[0][w] = anySend ? sat16((int32_t)sendD[i]) : 0;

@@ -133,6 +133,12 @@ CXX_FIXES = [
     (r"extern\s+C12_LXR_DATA\s+__fp16\s+FX_BUFFER\[[^\]]*\];", "", 1),
     # implicit conversion from void* (pocket_lxr.c, CRC-32)
     (r"const uint8_t\* p = data;", "const uint8_t* p = (const uint8_t*)data;", 1),
+    # `struct event e = { 0 };` (pocket_lxr.c, the six control-side event builders): in C++ GCC's
+    # -Wextra reports every member after the first as missing an initialiser, and Plinky's
+    # hardware build treats that as an error. Empty braces value-initialise (every member zero,
+    # exactly as before) in C++, and are accepted by GCC and Clang in gnu11 (and C23) for the
+    # C reference build, which compiles this same text.
+    (r"struct event e = \{ 0 \};", "struct event e = {};", 6),
 ]
 # With packed tables the arrays are written once at start-up (lxr_tables_unpack.c), which C
 # tolerates against the firmware's `extern const` declarations and C++ does not.
