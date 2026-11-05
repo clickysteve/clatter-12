@@ -41,19 +41,34 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
   - [x] Scenes: eight mixer + FX snapshots, recalled at the next bar (sample-exact for the mixer).
   - [x] Project version 2 (step layout, FX, REPEAT settings, scenes); version-1 projects convert.
   - [x] Engine trigger log; 66 engine-level timing tests; 201 panel checks; QEMU scenarios for all of it.
+- 0.0.4-exp, performance and hardware readiness (TESTING.md "CPU", HARDWARE_TESTING.md):
+  - [x] Stage-by-stage QEMU profile (`make m33-profile`); bench scenarios for editing, kits, scenes,
+        start/stop; `-Os`/`-O3` sensitivity.
+  - [x] Spreading: an LXR block in stages, the next block started after a callback's output, up to its
+        average share: busiest blocks 25-30 % lower (QEMU), the samples unchanged.
+  - [x] Converter 33 900 → 24 300 a block, bit-identical; Pocket's unused Q23 stage gone; FX setters
+        only when their own values move; delay lines interleaved, effects idling separately.
+  - [x] Reverb lines (26 KB) from PSRAM to the panel's SRAM arena; delay (256 KB) one PSRAM stream.
+  - [x] Golden sessions and `tools/compare_builds.sh`: bit-identical to 0.0.3 with spreading off.
+  - [x] Sanitizer run (ASan, UBSan): no memory errors; two negative shifts in CLATTER 12's mix fixed.
+  - [x] HARDWARE_TESTING.md: backup, recovery, staged first test, stop conditions.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 
 - [ ] Run this version in Plinky's IDE emulator: pages, saving to a slot and loading it, page scrolling.
-- [ ] **First device run: the DSP page and log, idle, all tracks, FX on.** QEMU says the default engine
-      executes at least 56 % (mean) and 81 % (busiest block) of a 150 MHz core 1's cycles; it may not fit.
+- [ ] **First device run (HARDWARE_TESTING.md): the DSP page and log, idle, all tracks, delay and
+      reverb on.** QEMU now says at least 65 % (mean) and 73 % (busiest block) of a 150 MHz core 1 with
+      the delay and reverb on all tracks, 77 % / 84 % in the worst case tried; cycles will be more.
 - [ ] If over budget, in order (each keeps the LXR's synthesis): `clatter_12_sram.cpp` (LXR code in
-      SRAM); the converter in SRAM and with fewer taps (35 000 instructions a block now); skip a voice's
-      render while it is silent (Pocket notes the filter/LFO state care needed); spread the two-LXR-block
-      peaks with one more block of output buffering if Plinky's DMA allows; only then a lower LXR rate.
+      SRAM); the converter and the mix stages in SRAM; skip a voice's render while it is silent (the
+      six voices are 83 000 of an LXR block's 87 000 instructions even when nothing plays; needs the
+      oscillator, filter and smoothing state handled, and a sound comparison); only then a lower LXR
+      rate or a shorter converter.
 - [ ] Settle table placement (SRAM / PSRAM / inside the panel arena with a custom staged-load commit).
-- [ ] Settle source size with Plinky: 403 KB compact now (the IDE's Test took 306 KB; another author
-      reports ~200 KB for Flash). Identifier compaction or dropping unused LXR paths if needed.
+- [ ] Settle source size with Plinky: 483 KB compact now (the IDE's Test took 306 KB; another author
+      reports ~200 KB for Flash). Lossless compaction cannot reach 200 KB (renaming every internal
+      identifier and removing all removable spaces leaves about 270 KB of engine before the glue):
+      a limit that low has to be raised by Plinky, or LXR code dropped.
 - [ ] Confirm `SAMPLE_FREQ`, output level through Plinky's chain, and that the sends reach its effects.
 - [ ] Make the load readout work in the emulator (`time_us()` is frozen within a block there).
 

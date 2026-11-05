@@ -42,13 +42,29 @@ static uint32_t mono_ticks(void)
 	return mono;
 }
 
-static void scenario(const char* name, double ipt, unsigned blocks)
+/* The share of a 2000 us block the instructions would take at 150 MHz, one instruction a cycle: a
+ * LOWER BOUND on the RP2350 (see the header). */
+static double pct(double instructions) { return instructions / 300000.0 * 100.0; }
+
+static void report(const char* name, double ipt, double sum, double max, unsigned blocks)
+{
+	struct c12_engine_profile pr;
+	c12_engine_profile_read(&pr);
+	const double c = pr.calls ? pr.calls : 1;
+	printf("  %-46s mean %7.0f (%3.0f%%)  max %7.0f (%3.0f%%) | LXR %6.0f  mix/FX %6.0f (space %6.0f)  convert %6.0f | stages %2u\n", name,
+	       sum / blocks, pct(sum / blocks), max, pct(max), pr.lxr_us * ipt / c, pr.mix_us * ipt / c, pr.space_us * ipt / c, pr.rs_us * ipt / c,
+	       (unsigned)pr.stages_max);
+}
+
+/* `hands`, if given, runs before each block (what a player does between callbacks) */
+static void scenario_with(const char* name, double ipt, unsigned blocks, void (*hands)(unsigned))
 {
 	struct c12_engine_profile pr;
 	c12_engine_profile_read(&pr);
 	double sum = 0, max = 0;
 	for (unsigned b = 0; b < blocks; b++)
 	{
+		if (hands) hands(b);
 		uint32_t t0 = ticks();
 		c12_engine_render(out, 64);
 		double i = since(t0) * ipt;
@@ -56,10 +72,42 @@ static void scenario(const char* name, double ipt, unsigned blocks)
 		if (i > max) max = i;
 		c12_kit_pump(48);
 	}
-	c12_engine_profile_read(&pr);
-	const double c = pr.calls ? pr.calls : 1;
-	printf("  %-44s mean %7.0f  max %7.0f | LXR %6.0f  mix/FX %6.0f (space %6.0f)  convert %6.0f\n", name, sum / blocks, max,
-	       pr.lxr_us * ipt / c, pr.mix_us * ipt / c, pr.space_us * ipt / c, pr.rs_us * ipt / c);
+	report(name, ipt, sum, max, blocks);
+}
+static void scenario(const char* name, double ipt, unsigned blocks) { scenario_with(name, ipt, blocks, 0); }
+
+/* hands */
+static void fx_editing(unsigned b)
+{
+	c12_fx_set(C12_FX_COMP_ATTACK, (int)(b % 128));
+	c12_fx_set(C12_FX_DLY_FILTER, (int)(b * 7u % 128u));
+	c12_fx_set(C12_FX_VERB_DAMP, (int)(b * 3u % 101u));
+}
+static uint8_t kit2[C12_KIT_PARAMS];
+static void kit_regen(unsigned b)
+{
+	if (b % 100 == 0)
+	{
+		c12_kit_design(kit2, (int)(b / 100u) % 16, b, 80);
+		c12_kit_set_target(kit2, C12_KIT_PARAMS);
+		c12_kit_pump(255); /* the whole kit queued at once (the panel streams 48 a frame) */
+	}
+}
+static void scenes(unsigned b)
+{
+	if (b % 50 == 0)
+	{
+		struct c12_mix_state m;
+		c12_mix_get(&m);
+		m.mute = (uint8_t)((b / 50u) & 0x7f);
+		m.master = (uint8_t)(80u + b % 40u);
+		for (int t = 0; t < 7; t++) m.level[t] = (uint8_t)(60u + (b + 13u * t) % 60u);
+		c12_mix_schedule(&m, 0);
+	}
+}
+static void start_stop(unsigned b)
+{
+	if (b % 25 == 0) pocket_seq_play((b / 25u) & 1u ? 0 : 1);
 }
 
 static void pattern(int busy, int ratchet)
@@ -84,7 +132,8 @@ int main(void)
 	SYST_CSR = 5;
 	const double ipt = calibrate();
 	printf("CLATTER 12 engine on QEMU mps2-an505 (Cortex-M33), -icount: %.2f instructions per tick\n", ipt);
-	printf("  instructions per 64-frame output block (2000 us at 32 kHz); the stages are means\n");
+	printf("  instructions per 64-frame output block (2000 us at 32 kHz); stages are means; %% of a 2000 us block at\n"
+	       "  150 MHz if every instruction took one cycle (a lower bound); stages: most LXR stages in one block (12 a block)\n");
 	lastCvr = SYST_CVR;
 	c12_engine_set_clock(mono_ticks);
 	c12_tables_bind(tables);
@@ -143,6 +192,21 @@ int main(void)
 	for (int t = 0; t < 4; t++) c12_perf_note_repeat(t, C12_DIV_32T, 100, 100, 0);
 	scenario("+ four note repeats at 1/32T", ipt, 800);
 	for (int t = 0; t < 4; t++) c12_perf_note_repeat(t, C12_DIV_OFF, 100, 100, 0);
+	/* hands on it, with the delay and reverb on */
+	scenario_with("+ FX values moving every block (comp, filters)", ipt, 800, fx_editing);
+	scenario_with("+ a new kit every 100 blocks, queued at once", ipt, 800, kit_regen);
+	scenario_with("+ a scene (levels, mutes, master) every 50", ipt, 800, scenes);
+	{
+		/* the mixer as it was */
+		struct c12_mix_state m;
+		c12_mix_get(&m);
+		m.mute = 0;
+		m.master = 100;
+		for (int t = 0; t < 7; t++) m.level[t] = t == 2 ? 70 : 100;
+		c12_mix_schedule(&m, 0);
+	}
+	scenario_with("+ PLAY and STOP every 25 blocks", ipt, 800, start_stop);
+	pocket_seq_play(1);
 	/* the worst case asked for: tempo changing every block, 8x ratchets, flams, repeats, both
 	   effects, the compressor */
 	pattern(1, C12_RATCHET_8);
@@ -169,11 +233,28 @@ int main(void)
 			sum += i;
 			if (i > max) max = i;
 		}
-		c12_engine_profile_read(&pr);
-		const double c = pr.calls ? pr.calls : 1;
-		printf("  %-44s mean %7.0f  max %7.0f | LXR %6.0f  mix/FX %6.0f (space %6.0f)  convert %6.0f\n", "WORST: tempo every block, 8x, flams, repeats, all FX",
-		       sum / 1500, max, pr.lxr_us * ipt / c, pr.mix_us * ipt / c, pr.space_us * ipt / c, pr.rs_us * ipt / c);
+		report("WORST: tempo every block, 8x, flams, repeats, FX", ipt, sum, max, 1500);
 	}
+	/* the same with spreading off (every LXR block rendered in the callback that needs it, as
+	   before): what spreading does to the busiest blocks */
+	printf("  spreading off (c12_engine_set_spread(0)):\n");
+	c12_engine_set_spread(0);
+	pattern(0, 0);
+	pocket_seq_play(0);
+	c12_fx_set(C12_FX_COMP_WET, 0);
+	c12_perf_set_repeat(C12_DIV_OFF, 0, 0);
+	for (int t = 0; t < 3; t++) c12_perf_note_repeat(t, C12_DIV_OFF, 100, 100, 0);
+	for (int t = 0; t < 7; t++) c12_mix_set_send(t, 0, 0);
+	pocket_seq_set_tempo(120);
+	for (int k = 0; k < 2000; k++) { c12_engine_render(out, 64); c12_kit_pump(48); } /* tails gone */
+	scenario("  stopped, silent", ipt, 400);
+	pattern(1, 0);
+	pocket_seq_play(1);
+	c12_mix_set_send(0, 64, 64);
+	c12_mix_set_send(3, 64, 64);
+	scenario("  playing all tracks, delay and reverb", ipt, 800);
+	c12_engine_set_spread(1);
+	scenario("  (spreading on again, the same)", ipt, 800);
 	struct c12_engine_stats st;
 	c12_engine_stats_read(&st);
 	printf("  underruns %u, clipped %u, strokes %u, graces %u, repeats %u, added %u, thinned ratchets %u\n", (unsigned)st.underruns,

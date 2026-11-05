@@ -15,9 +15,11 @@
  *   audio context    c12_engine_render. On the Plinky 12: on_dsp, core 1.
  *
  * Signal path per output block:
- *   while the resampler lacks input: pocket_lxr_render_q23 one 64-frame LXR block at 44 140 Hz
- *     (Pocket drains queued events and runs pocket_seq_block at its start, as on the LXR-02),
- *   c12_rs_process to the output rate, saturate to int16.
+ *   while the resampler lacks input: one 64-frame LXR block at 44 140 Hz, pocket_lxr_render_q23's
+ *     sequence of calls run in stages (queued events and pocket_seq_block at its start, as on the
+ *     LXR-02; then the voices; then CLATTER 12's mix),
+ *   c12_rs_process to the output rate, saturate to int16,
+ *   then, spreading (c12_engine_set_spread), the next block's first stages.
  * So the sequencer and triggers keep the LXR's own 64-sample (1.45 ms) timing.
  */
 #ifndef C12_ENGINE_H
@@ -218,7 +220,7 @@ typedef uint32_t (*c12_clock_fn)(void);
 void c12_engine_set_clock(c12_clock_fn fn);
 struct c12_engine_profile {
 	uint32_t calls;
-	uint32_t lxr_us;     /* LXR voices and sequencer (pocket_lxr_render_q23) */
+	uint32_t lxr_us;     /* LXR voices and sequencer (the head and voice stages) */
 	uint32_t mix_us;     /* CLATTER 12's mix, FX, limiter */
 	uint32_t rs_us;      /* rate conversion and output */
 	uint32_t total_max_us;
@@ -227,6 +229,7 @@ struct c12_engine_profile {
 	uint16_t track_peak[C12_TRACKS]; /* each voice's largest |sample|, by its track */
 	uint16_t delay_peak, verb_peak;  /* CLATTER 12's delay and reverb returns */
 	uint32_t space_us;               /* of mix_us: the delay and reverb */
+	uint32_t stages_max;             /* most LXR stages (twelve a block) run in one c12_engine_render */
 };
 /* Copies and resets (counters restart). */
 void c12_engine_profile_read(struct c12_engine_profile* out);

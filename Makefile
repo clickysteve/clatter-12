@@ -157,8 +157,9 @@ bench: $(BUILD)/bench
 # QEMU counts instructions, not cycles (see TESTING.md). Needs qemu-system-arm and arm-none-eabi-gcc.
 ARM_GCC ?= $(shell command -v arm-none-eabi-gcc 2>/dev/null)
 QEMU_ARM ?= $(shell command -v qemu-system-arm 2>/dev/null)
+M33_BENCH_OPT ?= -O2
 $(BUILD)/m33_bench.elf: tests/m33/bench.c tests/m33/startup.c tests/m33/link.ld $(BUILD)/c12_engine_c.c
-	$(ARM_GCC) -std=gnu11 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard -O2 -ffunction-sections -fdata-sections -w \
+	$(ARM_GCC) -std=gnu11 -mcpu=cortex-m33 -mthumb -mfpu=fpv5-sp-d16 -mfloat-abi=hard $(M33_BENCH_OPT) -ffunction-sections -fdata-sections -w \
 		-include stdint.h -include stddef.h -include string.h -include stdlib.h -include stdio.h -include math.h -include assert.h \
 		-DC12_LXR_CODE= -DC12_LXR_DATA= -Icore -I$(POCKET)/engine -I$(POCKET)/seq --specs=rdimon.specs -nostartfiles \
 		-T tests/m33/link.ld tests/m33/startup.c tests/m33/bench.c $(BUILD)/c12_engine_c.c -lm -lrdimon -Wl,--gc-sections -o $@

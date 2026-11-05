@@ -9,7 +9,8 @@
  *   double and triple strokes, accelerating and decelerating rolls; tempo changes; beat repeat and
  *   note repeat (straight, triplet, following tempo); fill and density; scenes at the bar; the
  *   delay and reverb: routing, time, feedback, filter, wet, size, decay, damping, freeze, idle,
- *   and Plinky's sends instead.
+ *   and Plinky's sends instead; spreading (the same samples, the work per callback, the latency it
+ *   adds), each effect idling on its own, and rapid editing of everything at once.
  */
 #include <math.h>
 #include <stdlib.h>
@@ -624,6 +625,142 @@ static void space(void)
 	CHECK(st.space_blocks == 0 && st.underruns == 0, "without memory bound the effects stay off");
 }
 
+/* ---- real-time behaviour: spreading, the work in one callback, the effects idling on their own */
+static int16_t runA[OUT_RATE * 6 * 2], runB[OUT_RATE * 6 * 2];
+static void busy_pattern(void)
+{
+	struct pocket_pattern* p = pocket_seq_edit_begin();
+	memset(p, 0, sizeof *p);
+	for (int t = 0; t < C12_TRACKS; t++)
+		for (int s = 0; s < 16; s++)
+			if ((s + t) % 3 == 0) p->cell[t][s] = POCKET_CELL(70 + 8 * t, 0);
+	p->cell[5][3] = C12_CELL_WITH_EXT(POCKET_CELL(110, 0), C12_RATCHET_4, C12_CURVE_FADE_OUT, C12_ROLL_NONE);
+	p->cell[3][8] = C12_CELL_WITH_EXT(POCKET_CELL(110, 0), C12_RATCHET_1, C12_CURVE_FLAT, C12_ROLL_FLAM);
+	p->cell[1][14] = C12_CELL_WITH_EXT(POCKET_CELL(100, 0), C12_RATCHET_1, C12_CURVE_FLAT, C12_ROLL_ACCEL);
+	p->last_page = 0;
+	pocket_seq_edit_commit();
+}
+/* most LXR stages in one callback since the last call */
+static unsigned stages_max(void)
+{
+	struct c12_engine_profile pr;
+	c12_engine_profile_read(&pr);
+	return pr.stages_max;
+}
+static unsigned sequenced_run(int spread, int16_t* out)
+{
+	c12_engine_set_spread(spread);
+	start(132, 1);
+	busy_pattern();
+	for (int t = 0; t < C12_TRACKS; t++) c12_mix_set_send(t, 40 + 10 * t, 100 - 10 * t);
+	pocket_seq_play(1);
+	/* the first two callbacks after start-up fill the converter's window: two blocks each, either way */
+	for (unsigned b = 0; b < 2; b++) c12_engine_render(&out[b * 128], 64);
+	stages_max();
+	for (unsigned b = 2; b < OUT_RATE * 6 / 64; b++) c12_engine_render(&out[b * 128], 64);
+	return stages_max();
+}
+
+static void realtime(void)
+{
+	struct c12_engine_stats st;
+	/* spreading changes when work is done, never what: a sequenced session, everything set before
+	   PLAY, sample for sample the same with it and without */
+	const unsigned stagesOff = sequenced_run(0, runA);
+	const unsigned stagesOn = sequenced_run(1, runB);
+	c12_engine_stats_read(&st);
+	unsigned same = 0;
+	for (unsigned i = 0; i < OUT_RATE * 6 * 2; i++) same += runA[i] == runB[i];
+	CHECK(same == OUT_RATE * 6 * 2, "spreading: the same samples with it and without (%u of %u)", same, OUT_RATE * 6 * 2);
+	/* the work in one callback: without spreading a callback may run two whole LXR blocks (24
+	   stages); with it, about its average share (1.38 blocks) and a stage or two more */
+	printf("  most LXR stages in one 64-frame callback: %u without spreading, %u with (twelve a block)\n", stagesOff, stagesOn);
+	CHECK(stagesOff == 24, "without spreading the busiest callback runs two LXR blocks (%u stages)", stagesOff);
+	CHECK(stagesOn <= 19, "with spreading no callback runs more than 19 stages (%u)", stagesOn);
+	CHECK(st.underruns == 0 && st.lxr_max_per_out <= 2, "spreading: no underruns (%u)", st.underruns);
+
+	/* what spreading costs: a hand-played hit (stopped transport) reaches the engine at most one
+	   LXR block later than without, whatever the phase of the callback it is played in */
+	int extraMax = -1, extraMin = 99;
+	for (int phase = 2; phase < 25; phase++) /* after the two start-up callbacks */
+	{
+		int at[2];
+		for (int sp = 0; sp < 2; sp++)
+		{
+			c12_engine_set_spread(sp);
+			start(120, 0);
+			for (int k = 0; k < phase; k++) c12_engine_render(blockPcm, 64);
+			/* the same callbacks before it with spreading and without: compare the blocks at which
+			   it sounds (counted from c12_engine_init), not against the engine's own block count,
+			   which spreading moves on early too */
+			c12_perf_play(2, cell(100));
+			render_ms(20);
+			struct c12_trigger_event e[4];
+			at[sp] = events(2, 1u << C12_TRIG_HAND, 0, e, 4) ? (int)e[0].block : -100;
+		}
+		const int extra = at[1] - at[0];
+		if (extra > extraMax) extraMax = extra;
+		if (extra < extraMin) extraMin = extra;
+	}
+	CHECK(extraMin >= 0 && extraMax <= 1, "spreading delays a control change by 0 to 1 LXR block (%d to %d)", extraMin, extraMax);
+	CHECK(extraMax == 1, "(and the test sees the block it can cost)");
+	c12_engine_set_spread(1);
+
+	/* each effect idles on its own: sends to the reverb only, the delay does nothing; to the delay
+	   only, the reverb; none, and once the tails have died, neither */
+	start(120, 1);
+	set_cell(0, 0, cell(120));
+	set_cell(5, 8, cell(100));
+	pocket_seq_play(1);
+	c12_mix_set_send(0, 0, 100);
+	render_ms(2000);
+	CHECK(c12_space_busy() == 2, "reverb sends only: the delay idles (%d)", c12_space_busy());
+	c12_mix_set_send(0, 0, 0);
+	c12_mix_set_send(5, 100, 0);
+	render_ms(1500);
+	CHECK(c12_space_busy() == 1, "delay sends only: once its tail has died the reverb idles (%d)", c12_space_busy());
+	c12_mix_set_send(5, 0, 0);
+	c12_fx_set(C12_FX_DLY_FEEDBACK, 0);
+	render_ms(2500);
+	c12_engine_stats_read(&st);
+	const uint32_t sb = st.space_blocks;
+	render_ms(200);
+	c12_engine_stats_read(&st);
+	CHECK(c12_space_busy() == 0 && st.space_blocks == sb, "no sends, the tails gone: neither runs (%d, %u blocks)", c12_space_busy(), st.space_blocks - sb);
+
+	/* rapid editing: an FX value and the tempo moving every block, kits streaming, scenes, play
+	   and stop: no underruns */
+	start(120, 1);
+	busy_pattern();
+	for (int t = 0; t < C12_TRACKS; t++) c12_mix_set_send(t, 60, 60);
+	c12_fx_set(C12_FX_COMP_WET, 100);
+	pocket_seq_play(1);
+	render_ms(10);
+	stages_max();
+	uint8_t kit[C12_KIT_PARAMS];
+	for (unsigned b = 0; b < 4000; b++)
+	{
+		c12_fx_set(C12_FX_COMP_ATTACK, (int)(b % 128));
+		c12_fx_set(C12_FX_DLY_FILTER, (int)((b * 7) % 128));
+		if (b % 3 == 0) pocket_seq_set_tempo(60 + (int)(b * 13 % 240));
+		if (b % 700 == 0) { c12_kit_design(kit, (int)(b / 700) % 16, b, 70); c12_kit_set_target(kit, C12_KIT_PARAMS); }
+		if (b % 900 == 450)
+		{
+			struct c12_mix_state m;
+			c12_mix_get(&m);
+			m.mute = (uint8_t)(b & 0x7f);
+			c12_mix_schedule(&m, (int)(b & 1));
+		}
+		if (b % 1000 == 999) pocket_seq_play(b % 2000 == 999 ? 0 : 1);
+		c12_kit_pump(48);
+		c12_engine_render(blockPcm, 64);
+	}
+	c12_engine_stats_read(&st);
+	CHECK(st.underruns == 0, "rapid editing: no underruns (%u)", st.underruns);
+	const unsigned busiest = stages_max();
+	CHECK(busiest <= 19, "rapid editing: at most 19 stages a callback (%u)", busiest);
+}
+
 int main(void)
 {
 	c12_tables_bind(tableMem);
@@ -633,5 +770,6 @@ int main(void)
 	repeats();
 	fill_density_scenes();
 	space();
+	realtime();
 	return CHECK_REPORT("perform");
 }

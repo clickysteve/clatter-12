@@ -9,6 +9,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true   # clatter-pocket only; its own fm1_open submodule is not needed
+          fetch-depth: 0     # tools/compare_builds.sh builds an earlier revision
       - name: Tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld make python3 gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib qemu-system-arm
       - name: Published Plinky API (pinned)
@@ -18,7 +19,9 @@ jobs:
       - name: Cortex-M33 compile
         run: make CC=clang CXX=clang++ m33
       - name: Instructions per audio block on a Cortex-M33 (QEMU; an estimate, not a Plinky)
-        run: make CC=clang CXX=clang++ m33-bench
+        run: make CC=clang CXX=clang++ m33-bench m33-profile
+      - name: The same audio as before the performance pass (0.0.3, d854eda), sample for sample
+        run: CC=clang sh tools/compare_builds.sh d854eda nospread
       - name: Web build and its tests (the panel as WebAssembly)
         run: make CC=clang CXX=clang++ WASM_CC=clang WASM_LD=wasm-ld test-wasm
       - uses: actions/upload-artifact@v4

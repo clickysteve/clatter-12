@@ -31,7 +31,10 @@ make
 | `make panel` | `build/clatter_12.cpp` and its variants (below) |
 | `make test` | every host test (TESTING.md) |
 | `make m33` | Cortex-M33 compile of each variant, section sizes. `ARM_GXX=/path/to/arm-none-eabi-g++` if not on PATH |
-| `make m33-bench` | instructions per output block on a Cortex-M33, counted by QEMU (needs `qemu-system-arm`, `arm-none-eabi-gcc` with newlib). An estimate, see TESTING.md "CPU" |
+| `make m33-bench` | instructions per output block on a Cortex-M33, counted by QEMU (needs `qemu-system-arm`, `arm-none-eabi-gcc` with newlib). An estimate, see TESTING.md "CPU". `M33_BENCH_OPT=-Os` (after `rm build/m33_bench.elf`) for other flags |
+| `make m33-profile` | the same, stage by stage: the event head, each LXR voice, the mix stages, the converter |
+| `make golden` | `build/golden/*.raw`: four fixed 24 s sessions as raw PCM (`tests/golden.c`) |
+| `sh tools/compare_builds.sh REV [nospread]` | builds revision REV's engine in a temporary git worktree and compares its sessions with this tree's, sample for sample (Linux; needs the git history) |
 | `make bench` | host timing (not predictive of the RP2350) |
 | `make pocket-test` | CLATTER Pocket's own tests, unchanged |
 | `sh tools/fetch-plinky-headers.sh` | the published Plinky API bundle into `build/`, sha256-pinned |
@@ -45,10 +48,14 @@ make
 | `clatter_12_sram.cpp` | static SRAM | SRAM (`.time_critical`) | it links but the DSP page shows too much load |
 | `clatter_12_full.cpp` | static SRAM | flash | reading; the simulator uses it |
 
-All are generated: edit `core/`, `panel/` or the tools, never `build/`. Each file's header records
+In every variant the delay's lines (256 KB) are in PSRAM, 128 KB in, and the reverb's (26 KB) in the
+panel object. All are generated: edit `core/`, `panel/` or the tools, never `build/`. Each file's header records
 the CLATTER 12 commit and configuration it came from (`+modified` if built from uncommitted work).
 
 ## Installing (not yet done by anyone)
+
+The first device test, with the backup, recovery and stop conditions, is planned in
+[HARDWARE_TESTING.md](HARDWARE_TESTING.md).
 
 There is no command-line install: Plinky panels go through Plinky's IDE.
 

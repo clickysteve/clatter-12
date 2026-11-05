@@ -4,15 +4,18 @@
  * Copyright (C) 2026 The CLATTER contributors
  * SPDX-License-Identifier: GPL-3.0-only
  *
- * Per LXR block (64 frames at 44 140 Hz), in the audio context:
- *   1. pocket_lxr_render_q23: queued events, the block hook (Pocket's sequencer, then CLATTER 12's
- *      ratchet strokes), and the six LXR voices, each kept by Pocket for inspection;
- *   2. mix_block: CLATTER 12's own mix of those six voice blocks, made with Pocket's pan law and
+ * Per LXR block (64 frames at 44 140 Hz), in the audio context, as stages (lxr_stage, below):
+ *   1. pocket_lxr_render_q23's sequence of calls: queued events, the block hook (Pocket's
+ *      sequencer, then CLATTER 12's ratchet strokes), and the six LXR voices, each kept by Pocket
+ *      for inspection (Pocket's own Q23 output stage after them is not run);
+ *   2. the mix stages: CLATTER 12's own mix of those six voice blocks, made with Pocket's pan law and
  *      int16 conversion, master gain and DC blocker, so that with the mixer at unity and every
  *      effect off it is Pocket's mix sample for sample (tests/test_engine.c compares them); plus each
- *      track's level, mute and solo, the sends to Plinky's delay and reverb, the FX chain on the
+ *      track's level, mute and solo, the sends, CLATTER 12's delay and reverb, the FX chain on the
  *      tracks routed to it, bit reduction and the limiter;
  *   3. into the converter, and out at the output rate.
+ * The stages need pocket_lxr.c's file-scope names (drain, blockHook, voiceData, addVoice, mixL...):
+ * this file is built after it in one unit (tools/amalgamate.py), never on its own.
  */
 #include <stdint.h>
 #include <string.h>
@@ -86,7 +89,7 @@ static int32_t sendOut[2][128];
 static uint8_t sendsActive;
 static uint32_t outRate;
 /* the LXR block in stages (c12_engine_render) */
-enum { STG_HEAD, STG_V0, STG_V1, STG_V2, STG_V3, STG_V4, STG_V5, STG_MIX, STG_SPACE, STG_MASTER, STG_N };
+enum { STG_HEAD, STG_V0, STG_V1, STG_V2, STG_V3, STG_V4, STG_V5, STG_MIX, STG_SPACE, STG_FX0, STG_FX1, STG_MASTER, STG_N };
 static uint8_t lxrStage;    /* the next stage of the LXR block under way (STG_HEAD: none under way) */
 static uint8_t spreadOn = 1;
 
@@ -1031,31 +1034,29 @@ static inline float level_gain(unsigned level) { return (float)(level * level) *
 
 static IN_ITCM_RAM int16_t sat16(int32_t v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
 
-/* the FX chain on the routed voices, in chunks of 32 frames (the LXR FX's stack buffers) */
-static IN_ITCM_RAM void fx_chain(void)
+/* the FX chain on the routed voices, one chunk of 32 frames (the LXR FX's stack buffers): frames
+ * 32 * c to 32 * c + 31, each effect in turn */
+static IN_ITCM_RAM void fx_chunk(unsigned c)
 {
-	for (unsigned c = 0; c < C12_LXR_BLOCK; c += 32)
+	int16_t* in = fxIn + 2 * 32 * c;
+	int16_t* out = fxOut + 2 * 32 * c;
+	if (fxWet[0] > 0.f)
 	{
-		int16_t* in = fxIn + 2 * c;
-		int16_t* out = fxOut + 2 * c;
-		if (fxWet[0] > 0.f)
-		{
-			memset(out, 0, 32 * 2 * sizeof(int16_t));
-			Distortion_process(&fxDrive, in, out, out + 1, 32, 2, fxWet[0]);
-			memcpy(in, out, 32 * 2 * sizeof(int16_t));
-		}
-		if (fxWet[1] > 0.f)
-		{
-			memset(out, 0, 32 * 2 * sizeof(int16_t));
-			Ringmod_process(&fxRing, in, out, out + 1, 32, 2, fxWet[1]);
-			memcpy(in, out, 32 * 2 * sizeof(int16_t));
-		}
-		if (fxWet[2] > 0.f)
-		{
-			memset(out, 0, 32 * 2 * sizeof(int16_t));
-			Compressor_process(&fxComp, in, out, out + 1, 32, 2, fxWet[2]);
-			memcpy(in, out, 32 * 2 * sizeof(int16_t));
-		}
+		memset(out, 0, 32 * 2 * sizeof(int16_t));
+		Distortion_process(&fxDrive, in, out, out + 1, 32, 2, fxWet[0]);
+		memcpy(in, out, 32 * 2 * sizeof(int16_t));
+	}
+	if (fxWet[1] > 0.f)
+	{
+		memset(out, 0, 32 * 2 * sizeof(int16_t));
+		Ringmod_process(&fxRing, in, out, out + 1, 32, 2, fxWet[1]);
+		memcpy(in, out, 32 * 2 * sizeof(int16_t));
+	}
+	if (fxWet[2] > 0.f)
+	{
+		memset(out, 0, 32 * 2 * sizeof(int16_t));
+		Compressor_process(&fxComp, in, out, out + 1, 32, 2, fxWet[2]);
+		memcpy(in, out, 32 * 2 * sizeof(int16_t));
 	}
 }
 
@@ -1064,9 +1065,9 @@ static int32_t busMixL[C12_LXR_BLOCK], busMixR[C12_LXR_BLOCK];
 static int32_t busL[C12_LXR_BLOCK], busR[C12_LXR_BLOCK];
 static float sendD[C12_LXR_BLOCK], sendR[C12_LXR_BLOCK];
 
-/* The mix of one LXR block, in three stages (the scheduler below may put a callback between them):
- * the voices (levels, mutes, sends, meters), the delay and reverb, then the FX chain, the master,
- * the limiter and the sends ring. What one stage leaves for the next: */
+/* The mix of one LXR block, in stages (the scheduler below may put a callback between them): the
+ * voices (levels, mutes, sends, meters), the delay and reverb, the FX chain in two chunks, then the
+ * master, the limiter and the sends ring. What one stage leaves for the next: */
 static int mixAnySend, mixAnyDelay, mixAnyVerb, mixFxOn;
 
 static IN_ITCM_RAM void mix_voices(void)
@@ -1176,20 +1177,24 @@ static IN_ITCM_RAM void mix_space(void)
 	}
 }
 
-static IN_ITCM_RAM void mix_master(void)
+/* the routed voices through the FX chain, at the master gain Pocket's mix has: the first chunk
+ * of 32 frames (and the conversion of the whole block), then the second (two stages) */
+static IN_ITCM_RAM void mix_fx(unsigned chunk)
 {
-	const int fxOn = mixFxOn;
-	int anySend = mixAnySend;
-	/* the routed voices through the FX chain, at the master gain Pocket's mix has */
-	if (fxOn)
-	{
+	if (!mixFxOn) return;
+	if (chunk == 0)
 		for (int i = 0; i < C12_LXR_BLOCK; i++)
 		{
 			fxIn[2 * i] = sat16(mul_shift(busL[i], C12_MASTER_Q12, 12, 0));
 			fxIn[2 * i + 1] = sat16(mul_shift(busR[i], C12_MASTER_Q12, 12, 0));
 		}
-		fx_chain();
-	}
+	fx_chunk(chunk);
+}
+
+static IN_ITCM_RAM void mix_master(void)
+{
+	const int fxOn = mixFxOn;
+	int anySend = mixAnySend;
 	const float m0 = masterNow, m1 = level_gain(mixMaster);
 	masterNow = m1;
 	const float dm = (m1 - m0) * (1.f / C12_LXR_BLOCK);
@@ -1203,12 +1208,14 @@ static IN_ITCM_RAM void mix_master(void)
 	{
 		/* Pocket's master gain and DC blocker, to the bit (pocket_lxr.c), with 32-bit state: each
 		   multiply one SMULL on the Cortex-M33, where Pocket's 64 by 64 bits are a library call */
-		int32_t l = mul_shift(busMixL[i] << 8, C12_MASTER_Q12, 12, 0);
-		int32_t r = mul_shift(busMixR[i] << 8, C12_MASTER_Q12, 12, 0);
+		/* x 256, not << 8: the bus is signed, and a negative left shift is undefined in C and C++17
+		   (the same instruction either way) */
+		int32_t l = mul_shift(busMixL[i] * 256, C12_MASTER_Q12, 12, 0);
+		int32_t r = mul_shift(busMixR[i] * 256, C12_MASTER_Q12, 12, 0);
 		if (fxOn)
 		{
-			l += (int32_t)fxIn[2 * i] << 8;
-			r += (int32_t)fxIn[2 * i + 1] << 8;
+			l += (int32_t)fxIn[2 * i] * 256;
+			r += (int32_t)fxIn[2 * i + 1] * 256;
 		}
 		const int32_t yl = l - dcX[0] + mul_shift(dcY[0], DC_R_Q30, 30, 1 << 29);
 		const int32_t yr = r - dcX[1] + mul_shift(dcY[1], DC_R_Q30, 30, 1 << 29);
@@ -1293,7 +1300,8 @@ const int32_t* c12_engine_send(int which)
  * renderBlock), here cut into stages where nothing depends on the time between them: the head
  * (FX values applied, queued events, the block hook, modulation, LFOs, filter coefficients, each
  * voice's asynchronous part), each of the six voices (its samples, its decimator, Pocket's addVoice),
- * then CLATTER 12's mix in three stages. Each stage runs the same code as before, in the same order,
+ * then CLATTER 12's mix in five stages (the voices, the delay and reverb, the LXR FX chain's two
+ * 32-frame chunks, the master): twelve stages a block. Each stage runs the same code as before, in the same order,
  * so the audio is the same; Pocket's own Q23 output stage, which CLATTER 12 never used beyond the
  * sum of the voices, is not run (mix_voices reads that sum itself).
  *
@@ -1312,14 +1320,16 @@ void c12_engine_set_spread(int on) { spreadOn = on ? 1 : 0; }
 
 static IN_ITCM_RAM unsigned stage_weight(unsigned s)
 {
-	static const uint8_t w[STG_N] = { 70, 144, 143, 143, 116, 141, 140, 60, 0, 40 };
+	static const uint8_t w[STG_N] = { 70, 144, 143, 143, 116, 141, 140, 60, 0, 1, 1, 40 };
 	unsigned x = w[s];
+	if (s == STG_MIX && (mixFxOn || sendsActive)) x += 60u;
+	if ((s == STG_FX0 || s == STG_FX1) && mixFxOn)
+		x += (fxWet[0] > 0.f ? 56u : 0u) + (fxWet[1] > 0.f ? 29u : 0u) + (fxWet[2] > 0.f ? 95u : 0u) + (s == STG_FX0 ? 10u : 0u);
 	if (s == STG_SPACE)
 	{
 		const int b = spaceOn ? c12_space_busy() : 0;
 		x = 1u + (b & 1 ? 80u : 0u) + (b & 2 ? 77u : 0u);
 	}
-	if (s == STG_MASTER) x += (fxWet[0] > 0.f ? 112u : 0u) + (fxWet[1] > 0.f ? 58u : 0u) + (fxWet[2] > 0.f ? 190u : 0u);
 	return x;
 }
 
@@ -1391,6 +1401,10 @@ static IN_ITCM_RAM void lxr_stage(unsigned s)
 	case STG_SPACE:
 		mix_space();
 		break;
+	case STG_FX0:
+	case STG_FX1:
+		mix_fx(s - STG_FX0);
+		break;
 	default:
 		mix_master();
 		c12_rs_push(&rs, lxrF, C12_LXR_BLOCK);
@@ -1402,7 +1416,7 @@ static IN_ITCM_RAM void lxr_stage(unsigned s)
  * end of the one before) and how much was done */
 struct render_work {
 	uint32_t lxr_us, mix_us, t;
-	unsigned weight, blocks;
+	unsigned weight, blocks, stages;
 };
 
 static IN_ITCM_RAM void run_stage(struct render_work* w)
@@ -1417,6 +1431,7 @@ static IN_ITCM_RAM void run_stage(struct render_work* w)
 		w->t = t;
 	}
 	w->weight += stage_weight(s);
+	w->stages++;
 	if (s + 1u < STG_N)
 		lxrStage = (uint8_t)(s + 1u);
 	else
@@ -1430,7 +1445,7 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 {
 	if (frames > 128) frames = 128;
 	const uint32_t t0 = now_us();
-	struct render_work w = { 0, 0, t0, 0, 0 };
+	struct render_work w = { 0, 0, t0, 0, 0, 0 };
 	/* this callback's output: every block it needs, finished */
 	const uint32_t need = c12_rs_needed(&rs, frames);
 	while (rs.count < need)
@@ -1466,24 +1481,32 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 		sendRead = sendWrite - lag;
 		sendFrac = 0;
 	}
-	/* spreading: on with the next block, up to this callback's average share of the work, and
-	   never past what the next callback needs */
+	/* spreading: on with the next block, up to this callback's average share of the work, never
+	   past what the next callback needs, and never into a second block beyond this callback's:
+	   one head at most runs early, so a control change reaches the engine at most one LXR block
+	   later than without (tests/test_perform.c) */
 	if (spreadOn)
 	{
 		const uint32_t next = c12_rs_needed(&rs, frames);
 		unsigned block = 0;
 		for (unsigned k = 0; k < STG_N; k++) block += stage_weight(k);
 		const unsigned share = (unsigned)((uint64_t)block * frames * rs.in_rate / ((uint64_t)rs.out_rate * C12_LXR_BLOCK));
+		int head = lxrStage == STG_HEAD; /* may this callback still start a block? */
 		w.t = now_us();
 		while (w.weight < share && rs.count < next)
 		{
-			if (lxrStage == STG_HEAD && c12_rs_room(&rs) < C12_LXR_BLOCK) break;
+			if (lxrStage == STG_HEAD)
+			{
+				if (!head || c12_rs_room(&rs) < C12_LXR_BLOCK) break;
+				head = 0;
+			}
 			run_stage(&w);
 		}
 	}
 	st.out_blocks++;
 	st.lxr_blocks += w.blocks;
 	if (rendered > st.lxr_max_per_out) st.lxr_max_per_out = rendered;
+	if (w.stages > prof.stages_max) prof.stages_max = w.stages;
 	st.clipped += clipped;
 	if (clockFn)
 	{

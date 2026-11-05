@@ -4,20 +4,25 @@
  Plinky 12 firmware (not public)                       CLATTER 12 panel (build/clatter_12.cpp)
  ────────────────────────────────────                  ──────────────────────────────────────────────
  core 1  audio, 64 frames @ 32 kHz ──── on_dsp ──────▶ c12_engine_render
-                                                         while converter needs input:
-                                                           pocket_lxr_render_q23 (64 frames @ 44 140 Hz)
-                                                             ├ drain ≤ 32 queued events
-                                                             ├ block hook: pocket_seq_block; a scene
-                                                             │   at the bar; the musical clock; beat
-                                                             │   repeat; the step through FILL,
-                                                             │   DENSITY, the alt pattern; ratchets,
-                                                             │   rolls, graces ahead; note repeats
-                                                             └ LXR-02 voices (each kept per block)
-                                                           mix_block: level/mute/solo, sends (+throws),
-                                                             CLATTER 12's delay + reverb (SPACE),
+                                                         while the converter needs input, LXR blocks
+                                                         (64 frames @ 44 140 Hz) in twelve stages,
+                                                         Pocket's sequence of calls (lxr_stage):
+                                                           head: FX values; drain ≤ 32 queued events;
+                                                             block hook: pocket_seq_block; a scene
+                                                             at the bar; the musical clock; beat
+                                                             repeat; the step through FILL,
+                                                             DENSITY, the alt pattern; ratchets,
+                                                             rolls, graces ahead; note repeats;
+                                                             modulation, LFOs, filter coefficients
+                                                           six LXR-02 voices, a stage each
+                                                           mix: level/mute/solo, sends (+throws);
+                                                             CLATTER 12's delay + reverb (SPACE);
                                                              LXR FX (drive, ring, comp) on routed
-                                                             tracks, master, DC block, bits, limiter
+                                                             tracks, two chunks; master, DC block,
+                                                             bits, limiter
                                                          c12_rs_process  44 140 → 32 000 Hz
+                                                         spreading: the next block's stages, up to
+                                                           this callback's average share of work
           mix_buffers.dry ◀──────────────────────────── int16 stereo
           mix_buffers.delaysend/reverbsend ◀──────────── sends, with FX ENGINE PLINKY only
           Plinky mix/output (level, EQ, delay, reverb)
@@ -66,10 +71,12 @@ The same two contexts as Pocket's (see `pocket_lxr.h`), mapped onto the Plinky:
 ## CLATTER 12's mix
 
 Pocket mixes the six voices itself and keeps each voice's block for inspection
-(`pocket_lxr_voice_block`). CLATTER 12 re-mixes those blocks in `mix_block` (`core/c12_engine.c`)
-with Pocket's pan law, int16 conversion, master gain and DC blocker, to the bit, so the mixer and
-FX can sit inside the mix without touching Pocket. When the mixer is neutral and no FX are on it
-takes Pocket's own mix of the block instead (the same numbers), which keeps the default cost low.
+(`pocket_lxr_voice_block`). CLATTER 12 re-mixes those blocks in its mix stages (`mix_voices`,
+`mix_space`, `mix_fx`, `mix_master` in `core/c12_engine.c`) with Pocket's pan law, int16 conversion,
+master gain and DC blocker, to the bit, so the mixer and FX can sit inside the mix without touching
+Pocket. When the mixer is neutral and no FX are on it takes Pocket's own sum of the voices instead
+(the same numbers), which keeps the default cost low; Pocket's Q23 output stage after that sum is not
+run, as CLATTER 12 never used more of it.
 Levels ramp over a block; mute and solo also hold back the sequencer's triggers (as voices are
 struck), so a muted closed hat cannot choke an open one. The hats are one voice; its level and pan
 follow the hat track that last played it. Sends are built per voice (a held THROW puts a track's at
@@ -109,15 +116,32 @@ check timing to the block. The panel side (`perf_apply`, every UI frame, every p
 latched pads into those few bytes: nothing of the performance is stored, so releasing a pad restores
 the pattern exactly.
 
+## Spreading the work
+
+64 output frames at 32 kHz need 1.379 LXR blocks, so a callback that renders whole blocks does one or
+two, and the callbacks that do two set the peak. The engine therefore runs an LXR block as twelve
+stages (the head, each voice, the mix stages), the same calls in the same order as
+`pocket_lxr_render_q23`. A callback first finishes every block its own output needs, makes its output,
+then goes on with the next block's stages until it has done its average share of the work, by
+instruction weights measured in QEMU. It never goes past what the next callback will need, and never
+starts a second block beyond its own, so the samples are unchanged and a control change reaches the
+engine at most one LXR block (1.45 ms) later. In QEMU this takes the busiest blocks with the delay and
+reverb on from 283 500 to 216 100 instructions (TESTING.md, "CPU"). `c12_engine_set_spread(0)` turns it
+off; the tests compare both.
+
 ## CLATTER 12's delay and reverb
 
-`core/c12_space.c`, after the per-voice sends are built in `mix_block`: the delay at 44 140 Hz on two
-64 Ki-sample 16-bit lines (ping-pong), the reverb at 22 070 Hz (two allpass diffusers, a four-line
-Hadamard FDN with a damping low-pass and a T60-derived loss in each line). Their returns are added to
-the mix bus before the master gain, the DC blocker and the limiter. Parameters are applied at a block
-start when the FX serial moves or the tempo changes (the delay's time is a tempo division). The lines
-are 282 KB the panel binds at run time (PSRAM at 128 KB in); with nothing sent and every line exactly
-zero (samples truncate towards zero, so tails end) the block returns at once.
+`core/c12_space.c`, after the per-voice sends are built in `mix_voices`: the delay at 44 140 Hz on two
+64 Ki-sample 16-bit lines (ping-pong), stored interleaved as one 32-bit word a sample (one sequential
+stream each way in PSRAM, one load per tap); the reverb at 22 070 Hz (two allpass diffusers, a
+four-line Hadamard FDN with a damping low-pass and a T60-derived loss in each line). Their returns are
+added to the mix bus before the master gain, the DC blocker and the limiter. Parameters are applied at
+an LXR block start when the FX serial moves or the tempo changes (the delay's time is a tempo
+division); each coefficient is worked out again only when its own value moves. The panel binds the
+delay's 256 KB in PSRAM (128 KB in) and the reverb's 26 KB in its own object, in the SRAM arena
+(`c12_space_bind2`): the reverb reads six scattered streams, which PSRAM behind the XIP cache serves
+badly. Each effect with nothing sent to it and every line exactly zero (samples truncate towards
+zero, so tails end) does nothing.
 
 ## Rate conversion
 
@@ -125,20 +149,22 @@ The LXR's coefficients assume 44 140 Hz, and much of its timing is per sample (e
 cutoffs as a fraction of the rate, the decimator, recorded transients), so it is not re-tuned for
 32 kHz: it runs at 44 140 Hz and `core/c12_resampler.c` converts. Kaiser-windowed sinc, 32 taps,
 64 phases with linear interpolation, -6 dB at 16 kHz, ≈70 dB alias rejection, exact rational
-position (no drift). Per Plinky block it renders one or two LXR blocks (mean 1.379; never fewer
-than needed, `underruns` counted). About 4 100 multiply-adds per output block (not timed separately).
+position (no drift). About 4 100 multiply-adds per output block, the coefficient interpolation done
+in the same pass as the window: 24 300 instructions per output block with the output conversion
+(QEMU).
 
 ## Memory
 
 | | Size (GCC 13, Cortex-M33, engine and panel) | Where |
 |---|---|---|
-| code | 117 KB (`clatter_12_sram.cpp`: 96 KB flash + 14 KB SRAM) | flash / `.time_critical` SRAM |
+| code | 120 KB (`clatter_12_sram.cpp`: 98 KB flash + 15 KB SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
 | LXR tables, unpacked | 100 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
-| other static state (voices, event ring, patterns, converter, mix and send buffers, strokes, the trigger log) | 41 KB | static SRAM |
-| delay and reverb lines | 282 KB | PSRAM (bound at run time; none: silent) |
-| panel object (UI state, the kit, 16 undo snapshots, the project, two alternative patterns, scenes) | 45.4 KB | Plinky's 128 KB panel arena |
-| source file | 474 KB (`--compact`) | the IDE |
+| other static state (voices, event ring, patterns, converter (12 KB), mix and send buffers, strokes, the trigger log) | 40 KB | static SRAM |
+| delay lines | 256 KB | PSRAM (bound at run time; none: silent) |
+| reverb lines | 26 KB | the panel object (the last member, kept out of a staged load's copy, so a load leaves them silent) |
+| panel object (UI state, the kit, 16 undo snapshots, the project, two alternative patterns, scenes, the reverb's lines) | 72.1 KB | Plinky's 128 KB panel arena |
+| source file | 483 KB (`--compact`) | the IDE |
 
 Nothing large is on the stack in CLATTER 12's code (mix buffers are static; the LXR FX's own stack
 buffers are kept to 128 bytes by running them 32 frames at a time). No allocation anywhere. The

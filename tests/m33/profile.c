@@ -32,9 +32,10 @@ static inline uint32_t tk(void) { return SYST_CVR; }
 static inline uint32_t dt(uint32_t t0) { return (t0 - SYST_CVR) & 0xffffffu; }
 static double ipt;
 
-enum { S_HEAD, S_V0, S_V1, S_V2, S_V3, S_V4, S_V5, S_MIX, S_SPACE, S_MASTER, S_RS, S_TOTAL, S_N };
+enum { S_HEAD, S_V0, S_V1, S_V2, S_V3, S_V4, S_V5, S_MIX, S_SPACE, S_FX0, S_FX1, S_MASTER, S_RS, S_TOTAL, S_N };
 static const char* const sname[S_N] = { "head (events, seq, mod, LFO, SVF)", "DRUM 1", "DRUM 2", "DRUM 3", "SNARE", "CYMBAL", "HI-HAT",
-	"mix: voices, sends, meters", "mix: delay and reverb", "mix: FX chain, master, limiter", "converter, output, sends", "TOTAL per output block" };
+	"mix: voices, sends, meters", "mix: delay and reverb", "mix: LXR FX chain, frames 0-31", "mix: LXR FX chain, frames 32-63",
+	"mix: master, limiter, sends", "converter, output, sends", "TOTAL per output block" };
 static double ssum[S_N], smax[S_N];
 static unsigned scount[S_N];
 static void acc(int s, uint32_t t)
@@ -65,7 +66,7 @@ static void prof_stage(struct render_work* w)
 static void prof_render(int16_t* out_lr, unsigned frames)
 {
 	const uint32_t t0 = tk();
-	struct render_work w = { 0, 0, 0, 0, 0 };
+	struct render_work w = { 0 };
 	const uint32_t need = c12_rs_needed(&rs, frames);
 	while (rs.count < need) prof_stage(&w);
 	uint32_t t = tk();
@@ -96,7 +97,16 @@ static void prof_render(int16_t* out_lr, unsigned frames)
 		unsigned block = 0;
 		for (unsigned k = 0; k < STG_N; k++) block += stage_weight(k);
 		const unsigned share = (unsigned)((uint64_t)block * frames * rs.in_rate / ((uint64_t)rs.out_rate * C12_LXR_BLOCK));
-		while (w.weight < share && rs.count < next) prof_stage(&w);
+		int head = lxrStage == STG_HEAD;
+		while (w.weight < share && rs.count < next)
+		{
+			if (lxrStage == STG_HEAD)
+			{
+				if (!head) break;
+				head = 0;
+			}
+			prof_stage(&w);
+		}
 	}
 	acc(S_TOTAL, dt(t0));
 }
