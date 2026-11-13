@@ -1,5 +1,7 @@
 # Handoff (2026-11-13, fifth session: hardware build, diagnostics, pattern banks)
 
+CLATTER 12 0.0.6-exp. Part 1 (0.0.5): hardware build and diagnostics. Part 2 (0.0.6): pattern banks.
+
 Read this, then docs/HARDWARE_AUDIT.md, HARDWARE_TESTING.md, TESTING.md and docs/DESIGN.md.
 
 **Where it is.** CLATTER 12 0.0.5-exp. Part 1 of this session (its own commit): the hardware compile
@@ -10,11 +12,21 @@ pages and a richer log line; project loads hold the engine while Plinky copies t
 bit-identical to 0.0.4 (and 0.0.3 with spreading off). Not run in Plinky's emulator or on a device.
 
 **What the next session should do first**
-1. Plinky's IDE: paste `build/clatter_12.cpp` (473 KB), **Test**, then **Flash**: HARDWARE_TESTING.md.
+1. Plinky's IDE: paste `build/clatter_12.cpp` (477 KB), **Test**, then **Flash**: HARDWARE_TESTING.md.
    A link error naming RAM would mean the firmware-image analysis was wrong: report it with the
    firmware code. Stage 5's DSP and PEAK readings, and stage 8b's cycle log, decide the CPU question.
 2. If PSRAM tables prove slow, the sine table (8 KB, read by every oscillator) is the first candidate
-   for the panel object (75 KB of 128 used).
+   for the panel object (103 KB of 128 used: 8 KB fits).
+
+**Part 2 (0.0.6, its own commit): pattern banks.** Sixteen slots in the panel object (`bank`), the
+slot playing edited in the engine as before; switching done by the engine on the step
+(`c12_seq_queue`: NOW, BAR, END, STOP; ARCHITECTURE.md "Pattern switching"); the PATTERN overlay
+(tap the lit page pad) and PERFORM row 11; chains; project version 3. Rules that matter when changing
+it: every pattern write from the glue goes through `edit_begin`/`edit_commit`/`seq_cell`/
+`seq_last_page` (the pattern lock, and `bank_sync` first); never put a `slot_t` or a pattern on the
+stack (`make m33` fails over 1.5 KB of core-0 stack: use `work`); the engine reads Pocket's
+sequencer state (`step`, `phase`, `interval`, `pass`, `live`, `patterns`) to switch on the step, so a
+Pocket update must be re-checked against `seq_switch` and `test_perform`'s pattern tests.
 
 **What changed in Part 1 and why**
 - The engine's zero-initialised file-scope objects (LXR voices and parameters, Pocket's ring and
@@ -41,7 +53,7 @@ bit-identical to 0.0.4 (and 0.0.3 with spreading off). Not run in Plinky's emula
 experimental; no hardware claim without a device; do not change CLATTER Web or Pocket; the sound is
 the LXR's, never Plinky's synth renamed.
 
-**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (473 KB now; 483 KB
+**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (477 KB now; 483 KB
 reached the compiler); how many pages a panel may have (CLATTER 12 has eight, and seven settings
 pages); the heap size the firmware reserves and how much static SRAM a panel may count on (firmware
 90bd leaves 20 292 B above `.bss`); the core-1 stack size; the real core-1 clock, whether output is

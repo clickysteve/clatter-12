@@ -20,13 +20,14 @@ const ROW15 = { 0: 'SEQ', 1: 'SND', 2: 'GEN', 3: 'MIX', 4: 'FX', 5: 'PRF', 6: 'R
 const ROW15_PAGE = { 0: { 9: 'GEN', 10: 'MUT', 11: 'CLR' }, 5: { 9: 'LAT', 10: 'CMT', 11: 'REL' }, 6: { 9: 'LAT', 11: 'REL' } };
 const ROW_NAMES = {
   3: { 0: 'MUTE', 1: 'SOLO', 2: 'LEVEL', 10: 'FINE - +', 11: 'PAN', 12: 'DELAY SEND', 13: 'REVERB SEND', 14: 'METER' },
-  5: { 0: 'MUTE · SOLO', 1: 'KILL THROW FRZ', 2: 'THROW D · R', 4: 'FILL', 5: 'MUTATE', 6: 'DENSITY', 8: 'STUTTER', 10: 'SCENES', 13: 'BAR', 14: 'METERS' },
+  5: { 0: 'MUTE · SOLO', 1: 'KILL THROW FRZ', 2: 'THROW D · R', 4: 'FILL', 5: 'MUTATE', 6: 'DENSITY', 8: 'STUTTER', 10: 'SCENES', 11: 'PATTERNS', 13: 'BAR', 14: 'METERS' },
   6: { 0: 'REPEAT PADS', 1: '', 2: '', 4: 'RATE', 5: 'PRESSURE CURVE', 7: 'ROLL · TARGET', 9: 'BEAT REPEAT', 10: 'SHAPE · TRACKS', 13: 'BAR', 14: 'METERS' },
 };
 const ROW_NAMES_FX = [
   { 0: 'SENDS · BANK', 1: 'DELAY TIME', 2: 'FEEDBACK', 3: 'FILTER', 4: 'DELAY WET', 5: 'MONO · PING', 7: 'REVERB SIZE', 8: 'DECAY', 9: 'DAMPING', 10: 'REVERB WET', 14: 'RETURNS' },
   null,
 ];
+const ROW_NAMES_PATTERN = { 0: 'PATTERN SLOTS', 1: 'POSITION', 3: 'QUANT · VARIATION', 4: 'DUP VARY NEW BACK CLR', 6: 'CHAIN', 7: 'REPEATS', 8: 'CHAIN LOOP ADD DEL' };
 const ROW_NAMES_TEMPO = { 1: 'BPM', 7: '-10-5-1 ½ 2× +1+5+10', 9: 'PRESETS', 11: 'NUDGE - +', 13: 'TAP', 14: 'RANGE' };
 
 /* ---- the panel: here (silent) or in the audio worklet ---- */
@@ -59,7 +60,7 @@ function localTick(now) {
     for (let i = 0; i < n; i++) P.x.c12p_frame();
     P.leds.set(new Uint32Array(P.x.memory.buffer, P.x.c12p_leds(), 256));
     P.page = P.x.c12p_page(); P.playing = P.x.c12p_playing(); P.tempo = P.x.c12p_tempo();
-    for (let i = 0; i < 13; i++) P.status[i] = P.x.c12p_status(i);
+    for (let i = 0; i < 19; i++) P.status[i] = P.x.c12p_status(i);
     render();
   }
   P.timer = requestAnimationFrame(localTick);
@@ -163,17 +164,18 @@ function paint(b, c) {
 let labelsFor = '';
 async function labels() {
   /* row names and pad labels for the page shown, from the panel's own descriptions */
-  const page = P.page, bank = P.status[9], overlay = P.status[10];
-  const key = `${page}/${bank}/${overlay}`;
+  const page = P.page, bank = P.status[9], overlay = P.status[10], patterns = P.status[13];
+  const key = `${page}/${bank}/${overlay}/${patterns}`;
   if (labelsFor === key) return;
   labelsFor = key;
   for (let x = 0; x < 16; x++) {
-    const t = ROW15[x] || (ROW15_PAGE[page] || {})[x] || '';
+    const t = ROW15[x] || (patterns ? '' : (ROW15_PAGE[page] || {})[x]) || ''; // the page's own pads rest under the PATTERN overlay
     els[15 * 16 + x].firstChild.textContent = t;
   }
   for (let y = 0; y < 15; y++) {
     let name = '';
     if (overlay) name = ROW_NAMES_TEMPO[y] || '';
+    else if (patterns) name = ROW_NAMES_PATTERN[y] || '';
     else if (page === 0 && y < 7) name = ['DRUM 1', 'DRUM 2', 'DRUM 3', 'SNARE', 'CYMBAL', 'CL HAT', 'OP HAT'][y];
     else if (ROW_NAMES[page]) name = ROW_NAMES[page][y] ?? '';
     else if (page === 4 && ROW_NAMES_FX[bank]) name = ROW_NAMES_FX[bank][y] ?? '';
@@ -201,7 +203,7 @@ function lcd() {
   const el = $('#lcd'), s = P.status;
   const snd = { loading: 'LOADING', off: 'SOUND OFF', starting: 'STARTING...', on: P.muted ? 'MUTED' : 'SOUND ON', failed: 'NO SOUND' }[P.state];
   const html = P.sayUntil > performance.now() ? `<b>${P.say}</b>`
-    : `<span>PAGE <b>${PAGES[P.page] || '-'}</b></span><span><b>${P.tempo}</b> BPM</span><span>${P.playing ? '<b>PLAYING</b>' : 'STOPPED'}</span><span>LENGTH <b>${s[2] * 16}</b></span><span>SWING <b>${s[4]}</b></span><span>STYLE <b>${STYLES[s[0]] || ''}</b></span><span>KIT <b>${KITS[s[1]] || ''}</b></span><span>FX <b>${s[12] ? 'PLINKY' : 'CLATTER 12'}</b></span>${s[11] ? '<span><b>LATCH</b></span>' : ''}<span>UNDO <b>${s[7]}</b></span><span id="snd">${snd}</span>`;
+    : `<span>PAGE <b>${PAGES[P.page] || '-'}</b></span><span><b>${P.tempo}</b> BPM</span><span>${P.playing ? '<b>PLAYING</b>' : 'STOPPED'}</span><span>PATTERN <b>${(s[14] ?? 0) + 1}</b>${s[15] >= 0 ? ` → <b>${s[15] + 1}</b>` : ''}${s[17] ? ' <b>CHAIN</b>' : ''}</span><span>LENGTH <b>${s[2] * 16}</b></span><span>SWING <b>${s[4]}</b></span><span>STYLE <b>${STYLES[s[0]] || ''}</b></span><span>KIT <b>${KITS[s[1]] || ''}</b></span><span>FX <b>${s[12] ? 'PLINKY' : 'CLATTER 12'}</b></span>${s[11] ? '<span><b>LATCH</b></span>' : ''}<span>UNDO <b>${s[7]}</b></span><span id="snd">${snd}</span>`;
   if (el._h !== html) { el._h = html; el.innerHTML = html; }
 }
 function say(msg) { P.say = msg; P.sayUntil = performance.now() + 2600; setTimeout(render, 2650); render(); }

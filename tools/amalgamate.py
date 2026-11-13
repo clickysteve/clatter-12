@@ -460,7 +460,7 @@ RELOCATE = [
     # CLATTER 12's engine: converter, buses, sends, strokes, kit streaming
     "resampler", "sendRing", "trigLog", "sendOut", "outF", "lxrF", "strk", "grace", "probs",
     "kitTarget", "kitSent", "scratch", "busMixL", "busMixR", "busL", "busR", "sendD", "sendR",
-    "fxIn", "fxOut",
+    "fxIn", "fxOut", "queuedPattern",
 ]
 
 

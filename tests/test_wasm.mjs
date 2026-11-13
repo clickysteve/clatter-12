@@ -63,6 +63,13 @@ const described = (label) => {
 for (let p = 0; p < pages.length; p++) {
   tap(p, 15);
   frame(2);
+  if (x.c12p_status(13)) { // the pad of the page already shown: the PATTERN overlay
+    check(p === 0, 'the lit page pad opens the PATTERN overlay');
+    described('PATTERN overlay');
+    tap(p, 15);
+    frame(2);
+    check(!x.c12p_status(13), 'and tapping it again closes it');
+  }
   check(x.c12p_page() === p, `row 15 pad ${p} opens ${pages[p]}`);
   described(pages[p]);
 }
@@ -86,12 +93,29 @@ x.c12p_touch(8, 15, 0); frame(3);
 for (let i = 0; i < 4; i++) { x.c12p_touch(8, 15, 150); frame(10); x.c12p_touch(8, 15, 0); frame(90); }
 check(x.c12p_tempo() === 150, `tap tempo (${x.c12p_tempo()})`);
 x.c12p_set_tempo(120);
+
+// the pattern bank, as the page drives it: the overlay on SEQ, a slot, DUP, a queued switch
 tap(0, 15);
+frame(2);
+check(x.c12p_status(13) === 1, 'PATTERN overlay open on SEQ');
+const filled0 = x.c12p_status(16);
+check((filled0 & 1) === 1 && x.c12p_status(14) === 0, 'slot 1 playing, with the default beat');
+tap(0, 4); frame(2); // DUP (stopped: the copy at once)
+check(x.c12p_status(14) === 1 && (x.c12p_status(16) & 3) === 3, `DUP: slot 2 has the beat and plays (slot ${x.c12p_status(14) + 1})`);
+tap(15, 15); frame(10); // PLAY
+tap(0, 0); frame(2);
+check(x.c12p_status(15) === 0, 'playing: slot 1 queued for the bar');
+frame(600);
+check(x.c12p_status(14) === 0 && x.c12p_status(15) === -1, 'and it plays after the bar');
+tap(15, 15); frame(4); // STOP
+tap(0, 15);
+frame(2);
+check(x.c12p_status(13) === 0, 'PATTERN overlay closed');
 
 // save, change, load
 const n = x.c12p_save();
 const saved = str(x.c12p_text());
-check(n > 2000 && saved.startsWith('{"clatter12":"'), `a save (${n} bytes)`);
+check(n > 400 && saved.startsWith('{"clatter12":"'), `a save (${n} bytes)`);
 const before = leds();
 tap(9, 15); // GEN (SEQ's row 15)
 frame(4);

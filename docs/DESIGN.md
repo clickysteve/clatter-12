@@ -260,6 +260,7 @@ y 5   MUTATE small medium large (2 pads each)
 y 6   DENSITY: x0-6 thinner (-100 .. -14), x7-8 as written, x9-15 busier (+14 .. +100)
 y 8   STUTTER 1/8 1/16 1/32 1/32T (2 pads each)
 y 10  SCENES 1-8 (tap: recall; hold 1 s: store) | x9 QUANTISE (next bar / at once)
+y 11  PATTERN SLOTS 1-16 (tap: play it at the PATTERN overlay's QUANT point; see "Patterns")
 y 13  the step in the bar          y 14  meters: tracks, output, delay, reverb returns
 y 15  pages | TEMPO | LATCH COMMIT(hold) RELEASE | UNDO REDO STOP PLAY
 ```
@@ -284,8 +285,8 @@ Eight snapshots of the mixer (levels, mutes, solos, sends, route, master) and ev
 recalled **at the next bar** (QUANTISE on, playing): the engine takes the mixer as the bar's first step
 starts, before it sounds, so the downbeat is already in the new scene (`c12_mix_schedule`); the FX
 values follow within a UI frame (4 ms). Stopped, or QUANTISE off, at once. Hold a second: store.
-Saved with the project. CLATTER 12 has one pattern and one kit, so a scene does not change them:
-pattern and kit selection would need pattern and kit banks first (ROADMAP).
+Saved with the project. A scene does not change the pattern or the kit: patterns have their own
+switching (below), at the same bar if both are asked for; kit banks do not exist (ROADMAP).
 
 ## REPEAT
 
@@ -318,6 +319,93 @@ y 15   pages | TEMPO | LATCH . RELEASE | UNDO REDO STOP PLAY
   that rate. Shape: each repeat as loud, softer (-18 % each), or building. Kits and edits stay live. An
   audio-buffer repeat (stutter of the sound itself) is not built: it would need a buffer and CPU the
   budget does not have.
+
+## Patterns
+
+Sixteen pattern slots share one kit, one mixer and the FX. Each slot keeps its own steps for all seven
+tracks (velocities, variations, conditions and chances, ratchets, rolls and curves), its length (1-4
+bars), its swing, and its generator settings (style, density, complexity, seed). CLATTER 12 has no
+parameter locks and no per-track lengths, so a slot has none to keep.
+
+### The PATTERN overlay
+
+Why an overlay: the eight pages are full (and Plinky publishes no maximum page count, so a ninth was
+not assumed), and switching patterns must be one tap away while playing on any page. **Tap the lit
+pad of the page you are on** (row 15; it did nothing before): the overlay covers rows 0-14 of that page
+until you tap it again or change page. It works on every page but SAVE. The pad shows the overlay's
+colour while it is open, and **blinks amber on every page while a pattern waits to play**.
+
+```
+y 0   SLOTS 1-16     tap: play it  ·  hold one + tap another: copy  ·  white playing, blinking queued,
+                     lit has steps, dim empty
+y 1   where the pattern playing is, across its length
+y 3   QUANT: NOW  BAR  END            |  x5-7 VARIATION: subtle medium wild
+y 4   DUP (x0-1)  VARY (x3-4)  NEW (x6-7)  BACK (x9-10)  CLEAR (x13-14)
+y 6   CHAIN entries 1-16 (each its slot's colour; white: playing; the dim pad after the last: add)
+y 7   REPEATS of the selected entry, 1-16
+y 8   CHAIN on/off (x0)  LOOP/ONCE (x1)  ADD (x3)  DEL (x4)  ·  CLEAR CHAIN (x14-15, hold 0.5 s)
+```
+
+| Gesture | Result |
+|---|---|
+| Tap a slot, stopped | It plays from PLAY, at once. An empty slot is a new empty pattern |
+| Tap a slot, playing | Queued: it takes over at the QUANT point. Tap it (or the slot playing) again: cancelled. Tap another: that one instead |
+| Hold a slot, tap another | Copy the held slot into the tapped one (undoable) |
+| Tap DUP | The pattern playing is copied into the next empty slot, and the copy plays **from the next step**: nothing is heard to change, and the original stays as it is. Edit the copy, switch between the two |
+| Tap VARY | A variation of the pattern playing (CLATTER's mutation at the strength chosen, locked tracks untouched) goes into the next empty slot and is queued. The original is untouched |
+| Tap NEW | A new pattern from the generator (GEN's style, density and complexity) into the next empty slot, queued |
+| Hold DUP, VARY, NEW or CLEAR, tap a slot | That operation into that slot (VARY and NEW then do not play it) |
+| Tap BACK | The slot played before this one, from the next step: straight back to the original after trying a variation |
+| CLEAR | Only with a slot (hold CLEAR, tap the slot): destructive, two hands, undoable. Alone it does nothing |
+
+**QUANT** (where a queued pattern takes over): **NOW** at the next step, keeping the position
+(modulo the new pattern's length); **BAR** (default) at the next bar line, from the new pattern's
+first step; **END** when the pattern playing ends, from the new one's first step. The engine makes the
+switch in the very LXR block whose step is the boundary, before that step sounds: the clock, the
+swing pairs and the tempo run on untouched, so nothing drifts, nothing is late, and a flam on the new
+pattern's first step still goes out ahead of the bar. A pattern switched in starts its condition
+passes afresh (1:2 sounds on its first pass).
+
+**UNDO** covers every bank operation (copy, clear, DUP, VARY, NEW into a slot), whichever slot it
+changed: the history records which slot each state belongs to.
+
+### The chain
+
+Up to sixteen entries, each a slot and a number of repeats (1-16), for example `A×2 B C D`. Hold an
+entry and tap a slot to set it (the dim pad after the last entry appends); **ADD** appends the slot
+playing; **DEL** removes the selected entry; tap an entry to select it and see its repeats on row 7.
+**CHAIN on**: stopped, the first entry is set and PLAY plays the chain from it; playing, the chain
+jumps to the selected entry at the next bar. Each entry plays its slot for its repeats, then the next
+entry's slot takes over at the end of the pattern (queued in advance, made in the engine on the step).
+**LOOP** starts again after the last entry; **ONCE** stops the transport at the chain's end. While
+the chain plays, the entry playing is white and the next blinks, and row 7 lights the passes played.
+**Manual override**: picking a slot by hand pauses the chain (and cancels what it had queued); tap an
+entry to jump there; CHAIN on again resumes.
+
+### PERFORM's row 11
+
+The sixteen slots again, on the page made for playing: a tap queues a slot exactly as on the overlay.
+
+### Patterns and the performance (what persists across a change)
+
+| | Across a pattern change |
+|---|---|
+| Kit, mixer, FX, scenes | untouched: patterns share them. A scene and a pattern asked for the same bar both arrive at it |
+| Delay and reverb | untouched: their tails ring on through the change (tested with a switch to an empty slot) |
+| Voices | not restarted: a sound still ringing finishes; a ratchet or roll already playing plays out all its strokes |
+| Held or latched MUTE, SOLO, KILL, FILL, DENSITY, THROW, FREEZE, STUTTER | **persist**: they are the player's, not the pattern's |
+| MUTATE (held or latched) | persists, and plays a mutation **of the new pattern** from the switch on (the engine drops the old one's at the switch itself) |
+| BEAT REPEAT, note repeat | go on; beat repeat replays the steps of the pattern now playing |
+| LATCH, RELEASE | unchanged meaning; RELEASE never changes the pattern |
+| COMMIT | writes into the pattern playing, which is its slot |
+| Edits made while a switch waits | kept in the slot they were made in (the pattern the engine replaced goes back to its slot with every edit) |
+
+### Saving
+
+Project version 3: all sixteen slots (empty ones omitted, the others as their steps, sparse when that
+is smaller), the slot playing, the chain, QUANT and the variation strength, with everything version 2
+saved. A typical project is 1-4 KB; a full bank with every step of every slot set is 29 KB (40 KB of
+base64). Versions 1 and 2 load into slot 1 of an otherwise empty bank, with their length and swing.
 
 ## Diagnostics (settings pages above SEQ)
 
@@ -378,5 +466,6 @@ scene waiting for its bar, and the CLR, COMMIT and scene-store hold fills.
 ## Not yet
 
 Live recording from the audition pads, per-step pitch, parameter locks per step, MIDI and CV,
-phase lock to Plinky's clock, pattern and kit banks (and so scenes that change them), MORPH, an
+phase lock to Plinky's clock, kit banks (and so scenes that change kits or patterns), track-specific
+pattern lengths, MORPH, an
 audio-buffer stutter. See ROADMAP.md.

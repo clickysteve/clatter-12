@@ -53,8 +53,9 @@ same on every page: `SEQ SND GEN MIX FX PRF RPT SAV | TEMPO | page's own | UNDO 
 | FX | **SPACE**: CLATTER 12's delay (12 tempo divisions, feedback, low/high-pass filter, wet, ping-pong) and reverb (size, decay, damping, wet), freezes, and where the sends go (CLATTER 12's effects or Plinky's). **COLOUR**: routing; the LXR's drive, ring modulator and compressor; bit and sample-rate reduction |
 | PERFORM | all momentary (LATCH holds): mute, solo, kill groups, fills, a temporary mutation, density, stutter, delay and reverb throws, freezes; COMMIT (hold) writes it in, undoably; eight scenes recalled at the next bar |
 | REPEAT | hold a track to repeat it (1/4 to 1/64, triplets, dotted; pressure as velocity, rate or chance; curves); roll pads; beat repeat of the sequence (1 bar to 1/32T) with shape and tracks |
-| SAVE | Plinky's save/load page: the whole project in a song slot (version 2; version-1 projects convert) |
-| side buttons | Plinky's: tempo (left), pages (right; up from SEQ = CLATTER 12's DSP load page) |
+| PATTERN overlay | **tap the lit pad of the page you are on**: 16 pattern slots (tap: play at NOW / next BAR / pattern END; hold + tap: copy), DUP (copy and play it seamlessly), VARY (a variation into the next empty slot, queued), NEW, BACK (to the original), CLEAR (hold + slot); a chain of up to 16 entries with repeats, LOOP or ONCE. PERFORM's row 11 has the slots too |
+| SAVE | Plinky's save/load page: the whole project in a song slot, all 16 patterns and the chain (version 3; versions 1 and 2 load into slot 1) |
+| side buttons | Plinky's: tempo (left), pages (right; up from SEQ: seven diagnostic pages, DSP load, peak, overruns, late callbacks, spreading, voices, memory) |
 
 Interface design and rationale: [docs/DESIGN.md](docs/DESIGN.md).
 

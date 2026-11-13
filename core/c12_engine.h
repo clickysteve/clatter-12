@@ -186,6 +186,47 @@ struct c12_mix_state {
  * `at_bar` is 0. Returns 0, or -1 while an earlier one is still waiting. */
 int c12_mix_schedule(const struct c12_mix_state* s, int at_bar);
 int c12_mix_schedule_pending(void);
+
+/* ---- pattern switching (control context; the audio context does the switch) ---------------- *
+ * A pattern is queued, a copy taken, and the engine puts it in place of the one playing in the LXR
+ * block whose sequencer step is the boundary asked for, before that step sounds: the clock, the
+ * swing pairs and the tempo run on untouched, the voices and effects are not reset, and nothing is
+ * late or early. Modes:
+ *   C12_SWITCH_NOW   at the next step, the position kept (modulo the new pattern's length)
+ *   C12_SWITCH_BAR   at the next bar line (a step that is a multiple of 16), from the new
+ *                    pattern's first step
+ *   C12_SWITCH_END   when the pattern playing ends, from the new one's first step
+ *   C12_SWITCH_STOP  no pattern: the sequencer stops when the pattern playing ends
+ * Stopped, a queued pattern is put in place at once (and so plays from PLAY). A pattern switched in
+ * starts its condition passes afresh (1:2 is its own first pass), and a MUTATE alternative of the
+ * old pattern stops playing (the control context makes a new one). `slot` is the caller's name for
+ * the pattern (0-255), reported back by c12_seq_live_slot; `swing` takes effect with it.
+ * Writing patterns while a switch may happen: bracket every write (pocket_seq_edit_begin..commit,
+ * pocket_seq_set_cell, pocket_seq_set_last_page, and c12_seq_queue itself, which does it) with
+ * c12_seq_lock / c12_seq_unlock: the audio context never switches while the control context holds
+ * it: one that meets it held waits for it, about 100 us at most (c12_seq_late counts any that
+ * could not). Hold it only for a copy or a few cells. */
+struct pocket_pattern;
+enum { C12_SWITCH_NONE, C12_SWITCH_NOW, C12_SWITCH_BAR, C12_SWITCH_END, C12_SWITCH_STOP };
+void c12_seq_lock(void);
+void c12_seq_unlock(void);
+/* queue (replacing anything queued); `p` may be 0 for C12_SWITCH_STOP. Returns 0. */
+int c12_seq_queue(const struct pocket_pattern* p, unsigned slot, unsigned swing, unsigned mode);
+void c12_seq_cancel(void);
+/* what is queued: the mode (C12_SWITCH_NONE: nothing) and its slot */
+unsigned c12_seq_queued(unsigned* slot);
+/* the slot playing, as last switched or set (c12_seq_set_live_slot, for a pattern the control
+ * context put in place itself while stopped) */
+unsigned c12_seq_live_slot(void);
+void c12_seq_set_live_slot(unsigned slot);
+/* counters, for the control context to follow: switches made, patterns started (the sequencer's
+ * first step played, from PLAY or by wrapping or by a switch), stops made at an end (C12_SWITCH_STOP) */
+uint32_t c12_seq_switches(void);
+uint32_t c12_seq_starts(void);
+uint32_t c12_seq_stops(void);
+/* switches that found the lock held for longer than the audio context waits (C12_SWITCH_SPINS) and
+ * so moved to the next boundary: must stay 0 */
+uint32_t c12_seq_late(void);
 void c12_mix_get(struct c12_mix_state* out);
 
 /* ---- performance (control context writes; the audio context applies, nothing is stored) -- */

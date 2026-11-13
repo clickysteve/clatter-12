@@ -69,6 +69,9 @@ $(BUILD)/equiv_cxx: tests/equiv_cxx.cpp tests/scenario.inc $(BUILD)/c12_engine.i
 	$(CXX) $(CXXFLAGS_HOST) -w -I$(BUILD) -Itests tests/equiv_cxx.cpp -lm -o $@
 $(BUILD)/test_panel_sim: tests/test_panel_sim.cpp sim/plinky_sim.cpp sim/plinky_sim.h $(BUILD)/clatter_12_full.cpp
 	$(CXX) $(CXXFLAGS_HOST) -Wno-unused-parameter -Isim -I$(BUILD) -Itests tests/test_panel_sim.cpp sim/plinky_sim.cpp -lm -o $@
+# the same session on the compact file (the one pasted into Plinky's IDE): it must sound the same
+$(BUILD)/test_panel_sim_compact: tests/test_panel_sim.cpp sim/plinky_sim.cpp sim/plinky_sim.h $(BUILD)/clatter_12.cpp
+	$(CXX) $(CXXFLAGS_HOST) -Wno-unused-parameter -DC12_PANEL_COMPACT -Isim -I$(BUILD) -Itests tests/test_panel_sim.cpp sim/plinky_sim.cpp -lm -o $@
 # CLATTER Pocket's own host library (its Makefile, its flags), built into our build directory, as
 # the independent reference for the synthesis. Relative path: make cannot take one with spaces.
 $(BUILD)/pocket/liblxr_nofx.a:
@@ -85,7 +88,7 @@ $(BUILD)/test_authentic: tests/test_authentic.cpp tests/check.h $(BUILD)/c12_eng
 $(BUILD)/bench: tests/bench.c $(BUILD)/c12_unity.o
 	$(CC) $(TEST_CFLAGS) tests/bench.c $(BUILD)/c12_unity.o -lm -o $@
 
-test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD)/equiv_c $(BUILD)/equiv_cxx $(BUILD)/test_authentic $(BUILD)/test_panel_sim
+test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD)/equiv_c $(BUILD)/equiv_cxx $(BUILD)/test_authentic $(BUILD)/test_panel_sim $(BUILD)/test_panel_sim_compact
 	$(BUILD)/test_resampler
 	$(BUILD)/test_engine
 	$(BUILD)/test_perform
@@ -95,6 +98,8 @@ test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD
 	@# C++ resolves <math.h> calls on floats to the float overloads, C to the double ones: a few LSB
 	$(PY) tools/compare_pcm.py $(BUILD)/test/equiv_c.raw $(BUILD)/test/equiv_cxx.raw 80
 	$(BUILD)/test_panel_sim
+	$(BUILD)/test_panel_sim_compact > $(BUILD)/test/panel_compact.log || (tail -5 $(BUILD)/test/panel_compact.log; exit 1)
+	cmp $(BUILD)/sim/session.wav $(BUILD)/sim/session_compact.wav && echo "panel (compact file): the same session, sample for sample"
 	$(PY) tools/check_api.py panel/clatter12.cpp sim/plinky_sim.h
 
 # The generated panel as Plinky's hardware build would see it (tools/hw_check.py): ARM GCC for the

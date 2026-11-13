@@ -48,8 +48,9 @@ static bool c12_help(clatter12 *p, int page, int x, int y, c12_help_t &h) {
     if (x < 8) {
       snprintf(a, sizeof a, "%s PAGE", c12_page_names[x]);
       c12_help_set(h, a, "NAVIGATION · ROW 15, EVERY PAGE",
+                   x == page && x != 7 ? "The page you are on (lit white). TAP IT: the PATTERN overlay opens over the page (sixteen pattern slots, copy, duplicate, variations, the chain); tap again to close it. It blinks amber while a pattern waits to play. Row 15's first eight pads jump between pages; Plinky's right side buttons step through them too." :
                    x == page ? "The page you are on (lit white). Row 15's first eight pads jump between pages; Plinky's right side buttons step through them too. Audio keeps playing, and what LATCH holds keeps going." :
-                   x == 7 ? "Plinky's own save and load page: CLATTER 12 saves the whole project (steps, kit, mixer, FX, tempo, swing, generator, REPEAT settings, scenes) to a song slot. Leave it with the side buttons." :
+                   x == 7 ? "Plinky's own save and load page: CLATTER 12 saves the whole project (all sixteen pattern slots, the chain, kit, mixer, FX, tempo, generator, REPEAT settings, scenes) to a song slot. Leave it with the side buttons." :
                    "Go to this page. Switching pages never interrupts the sound; a pad held on the page you leave is let go.");
       return true;
     }
@@ -66,6 +67,47 @@ static bool c12_help(clatter12 *p, int page, int x, int y, c12_help_t &h) {
     if ((page == 5 || page == 6) && x == 9) { c12_help_set(h, p->latch ? "LATCH: ON" : "LATCH: OFF", K_TOG, "Off, a performance pad lasts while you hold it. On, a tap holds it until you tap it again (or RELEASE); turning LATCH off lets everything go. Shared by PERFORM and REPEAT."); return true; }
     if (page == 5 && x == 10) { c12_help_set(h, "COMMIT", K_DESTR, "Hold half a second: what the performance is doing to the pattern (a mutation, a fill, a density) is written into the pattern, and its mutes and solos into the mixer. Throws, freezes and stutters are moments and are not written. Then everything is released. UNDO takes it back."); return true; }
     if ((page == 5 || page == 6) && x == 11) { c12_help_set(h, "RELEASE ALL", "TAP", "Let go of everything LATCH holds: every performance change returns to the pattern and mixer as they are."); return true; }
+  }
+  if (p->pat_overlay && !p->tempo_overlay && y < 15) {
+    static const char *const qn[3] = {"NOW", "NEXT BAR", "PATTERN END"};
+    if (y == 0) {
+      const int q = p->queued_slot();
+      snprintf(a, sizeof a, "PATTERN %d%s", x + 1, x == p->cur ? " (PLAYING)" : x == q ? " (QUEUED)" : !(p->filled_mask() >> x & 1) ? " (EMPTY)" : "");
+      snprintf(b, sizeof b, "Tap: play this pattern (stopped: at once; playing: at the QUANT point, %s; tap it again to cancel). Hold it and tap another slot: copy it there (UNDO undoes). Hold DUP, VARY, NEW or CLEAR and tap it: that, into this slot. White: playing; blinking: queued; lit: has steps; dim: empty.", qn[clampi(p->quant - 1, 0, 2)]);
+      c12_help_set(h, a, "PATTERN SLOT · TAP · HOLD", b);
+      return true;
+    }
+    if (y == 1) { c12_help_set(h, "PATTERN POSITION", K_SHOW, "Where the pattern playing is, across its length."); return true; }
+    if (y == 3 && x < 3) {
+      static const char *const d[3] = {"The next step, at the same position in the new pattern: the quickest change.", "At the next bar line, from the new pattern's first step: the beat and the bar stay where they are.", "When the pattern playing ends, from the new one's first step."};
+      snprintf(a, sizeof a, "QUANT %s", qn[x]);
+      c12_help_set(h, a, K_SEL, d[x]);
+      return true;
+    }
+    if (y == 3 && x >= 5 && x < 8) { static const char *const n[3] = {"SUBTLE", "MEDIUM", "WILD"}; snprintf(a, sizeof a, "VARIATION %s", n[x - 5]); c12_help_set(h, a, K_SEL, "How far VARY moves a variation from the pattern playing (locked tracks never move)."); return true; }
+    if (y == 4) {
+      switch (p->op_at(x)) {
+      case c12glue::OP_DUP: c12_help_set(h, "DUPLICATE", "TAP · HOLD + SLOT", "Tap: the pattern playing is copied into the next empty slot, and that copy plays from the next step: nothing is heard to change, and the original stays as it is to come back to. Hold and tap a slot: copy into that slot."); return true;
+      case c12glue::OP_VARY: c12_help_set(h, "VARY", "TAP · HOLD + SLOT", "Tap: a variation of the pattern playing, at the strength chosen, into the next empty slot, queued to play. The original is untouched: BACK returns to it. Hold and tap a slot: the variation into that slot, not played."); return true;
+      case c12glue::OP_NEW: c12_help_set(h, "NEW PATTERN", "TAP · HOLD + SLOT", "Tap: a new pattern from the generator (GEN's style, density and complexity) into the next empty slot, queued. Hold and tap a slot: into that slot."); return true;
+      case c12glue::OP_BACK: c12_help_set(h, "BACK", "TAP", "The pattern you played before this one, from the next step: straight back to the original after trying a variation."); return true;
+      case c12glue::OP_CLEAR: c12_help_set(h, "CLEAR SLOT", "HOLD + SLOT · DESTRUCTIVE (UNDOABLE)", "Hold it and tap a slot to empty that slot. Alone it does nothing. UNDO brings the steps back."); return true;
+      default: return false;
+      }
+    }
+    if (y == 6 && x <= p->chain_len) {
+      if (x == p->chain_len) { c12_help_set(h, "CHAIN: NEXT ENTRY", "HOLD + SLOT", "Hold it and tap a slot to add that slot to the chain (or tap ADD for the pattern playing)."); return true; }
+      snprintf(a, sizeof a, "CHAIN %d: PATTERN %d x%d", x + 1, p->chain_slot[x] + 1, p->chain_rep[x]);
+      c12_help_set(h, a, "CHAIN ENTRY · TAP · HOLD + SLOT", "Tap: select it (its repeats show on the row below); with the chain playing, jump to it at the bar. Hold it and tap a slot: that slot plays here. White: the entry playing.");
+      return true;
+    }
+    if (y == 7 && p->chain_sel < p->chain_len) { snprintf(a, sizeof a, "REPEATS %d", x + 1); c12_help_set(h, a, K_SEL, "How many times the selected chain entry's pattern plays before the next entry. Lit white: the passes played."); return true; }
+    if (y == 8 && x == 0) { c12_help_set(h, p->chain_on ? "CHAIN: ON" : "CHAIN: OFF", K_TOG, "On: the chain leads, each entry's pattern for its repeats, switched at the pattern's end. PLAY starts it from its first entry. Picking a slot by hand pauses it."); return true; }
+    if (y == 8 && x == 1) { c12_help_set(h, p->chain_loop ? "LOOP" : "ONCE", K_TOG, "LOOP: the chain starts again after its last entry. ONCE: the transport stops at its end."); return true; }
+    if (y == 8 && x == 3) { c12_help_set(h, "ADD", "TAP", "Add the pattern playing to the end of the chain."); return true; }
+    if (y == 8 && x == 4) { c12_help_set(h, "DELETE ENTRY", "TAP", "Take the selected entry out of the chain."); return true; }
+    if (y == 8 && x >= 14) { c12_help_set(h, "CLEAR CHAIN", K_DESTR, "Hold half a second to empty the chain (the patterns stay)."); return true; }
+    return false;
   }
   if (p->tempo_overlay && y < 15) {
     if (y >= 1 && y <= 5 && x < 13) { snprintf(a, sizeof a, "%d BPM", (int)(get_tempo_bpm() + 0.5f)); c12_help_set(h, a, K_SHOW, "The tempo. Amber after a tap tempo."); return true; }
@@ -256,6 +298,11 @@ static bool c12_help(clatter12 *p, int page, int x, int y, c12_help_t &h) {
     return false;
   }
   case 5: { // PERFORM
+    if (y == 11) {
+      snprintf(a, sizeof a, "PATTERN %d%s", x + 1, x == p->cur ? " (PLAYING)" : x == p->queued_slot() ? " (QUEUED)" : "");
+      c12_help_set(h, a, "PATTERN SLOT · TAP", "Play this pattern, at the PATTERN overlay's QUANT point (next bar unless changed): the sixteen slots at hand while performing. Mutes, solos, kills, fills, throws and what LATCH holds go on across the change; a held MUTATE mutates the new pattern. Tap the queued slot again to cancel.");
+      return true;
+    }
     const char *t7 = x < 7 ? c12_track_names[x] : x >= 8 && x < 15 ? c12_track_names[x - 8] : "";
     if (y == 0 && x < 7) { snprintf(a, sizeof a, "MUTE %s", t7); c12_help_set(h, a, K_MOM, "Silent while held (with LATCH, until tapped again). The mixer's own mute is untouched: COMMIT makes it one."); return true; }
     if (y == 0 && x >= 8 && x < 15) { snprintf(a, sizeof a, "SOLO %s", t7); c12_help_set(h, a, K_MOM, "Only this track (and other held solos) while held."); return true; }

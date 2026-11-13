@@ -11,6 +11,7 @@
 #include "c12_space.h"
 #include "pocket_lxr.h"
 #include "pocket_seq.h"
+#include "pocket_gen.h"
 
 #define SYST_CSR (*(volatile uint32_t*)0xE000E010)
 #define SYST_RVR (*(volatile uint32_t*)0xE000E014)
@@ -122,6 +123,44 @@ static void pattern(int busy, int ratchet)
 	pocket_seq_edit_commit();
 }
 
+/* pattern switching: two busy patterns, switched in by the engine (c12_seq_queue) */
+static struct pocket_pattern swA, swB;
+static unsigned swN;
+static void switch_now(unsigned b)
+{
+	(void)b;
+	if (c12_seq_queued(0)) return; /* one at a time: the next as soon as the last is made */
+	c12_seq_queue(swN & 1u ? &swA : &swB, swN & 1u, 50, C12_SWITCH_NOW);
+	swN++;
+}
+static void switch_bar(unsigned b)
+{
+	(void)b;
+	if (c12_seq_queued(0)) return;
+	c12_seq_queue(swN & 1u ? &swA : &swB, swN & 1u, 50, C12_SWITCH_BAR);
+	swN++;
+}
+/* instructions of a control-side call (core 0 on the Plinky: it never meets the audio deadline) */
+static double timed(double ipt, void (*f)(void))
+{
+	uint32_t t0 = ticks();
+	f();
+	return since(t0) * ipt;
+}
+static struct pocket_pattern work;
+static void do_queue(void) { c12_seq_queue(&swA, 1, 50, C12_SWITCH_BAR); }
+static void do_vary(void) { work = swA; pocket_gen_mutate(&work, 1234u, 2, 0); }
+static void do_new(void)
+{
+	struct pocket_gen_settings gs = { 0 };
+	gs.seed = 99;
+	gs.density = 60;
+	gs.complexity = 70;
+	gs.style = 3;
+	memset(&work, 0, sizeof work);
+	pocket_gen_generate(&work, &gs);
+}
+
 extern void initialise_monitor_handles(void);
 
 int main(void)
@@ -207,6 +246,24 @@ int main(void)
 	}
 	scenario_with("+ PLAY and STOP every 25 blocks", ipt, 800, start_stop);
 	pocket_seq_play(1);
+	/* pattern switching (the bank): every track busy in both patterns, 4x ratchets and flams in one */
+	memset(&swA, 0, sizeof swA);
+	memset(&swB, 0, sizeof swB);
+	for (int t = 0; t < 7; t++)
+		for (int s = 0; s < 64; s++)
+		{
+			swA.cell[t][s] = (s + t) % 2 ? 0u : C12_CELL_WITH_EXT(100u, C12_RATCHET_4, C12_CURVE_FLAT, s % 8 == 4 ? C12_ROLL_FLAM : C12_ROLL_NONE);
+			swB.cell[t][s] = 90u;
+		}
+	swA.last_page = 1;
+	swB.last_page = 0;
+	scenario_with("+ a pattern switch at EVERY STEP (NOW), busy", ipt, 1500, switch_now);
+	scenario_with("+ a pattern switch at every bar (BAR), busy", ipt, 1500, switch_bar);
+	printf("  pattern switches made: %u (late: %u)\n", (unsigned)c12_seq_switches(), (unsigned)c12_seq_late());
+	printf("  control side (core 0), instructions: queue a pattern %.0f, VARY (mutate) %.0f, NEW (generate) %.0f\n",
+	       timed(ipt, do_queue), timed(ipt, do_vary), timed(ipt, do_new));
+	c12_seq_cancel();
+	pattern(0, 0);
 	/* the worst case asked for: tempo changing every block, 8x ratchets, flams, repeats, both
 	   effects, the compressor */
 	pattern(1, C12_RATCHET_8);

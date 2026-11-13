@@ -46,6 +46,17 @@ static const uint32_t COMMIT_US = 500000;   // COMMIT must be held this long
 static const uint32_t SCENE_STORE_US = 1000000; // a scene pad held this long stores
 static const int SCENES = 8;
 enum { UNDO_OTHER, UNDO_STEPS, UNDO_SOUND, UNDO_MIX };
+// the pattern bank (PATTERN overlay, docs/DESIGN.md "Patterns")
+static const int SLOTS = 16;
+static const int CHAIN_MAX = 16;
+static const uint32_t CHAIN_CLEAR_US = 500000; // CLEAR CHAIN must be held this long
+enum { OP_NONE = -1, OP_DUP, OP_VARY, OP_NEW, OP_BACK, OP_CLEAR, OPS };
+// one pattern slot: the steps (with their length) and what goes with them
+struct slot_t {
+  c12::pocket_pattern pat;
+  uint8_t swing, style, density, complexity;
+  uint32_t gen_seed;
+};
 
 static const uint32_t track_col[TRACKS] = {
     LED_RGB(31, 2, 0),  // DRUM 1
@@ -165,7 +176,7 @@ static inline int pressure_to_velocity(int pressure) {
 
 // ---- the project as saved: versioned, checked, and nothing else's ----
 static const uint32_t PROJECT_MAGIC = 0x50323143u; // "C12P"
-static const uint16_t PROJECT_VERSION = 2;
+static const uint16_t PROJECT_VERSION = 3;
 // a performance snapshot: what a scene recalls (the mixer and the FX; not the pattern or the kit)
 struct scene_t {
   uint8_t used, mute, solo, route, master, pad0;
@@ -191,6 +202,31 @@ struct project_t {
   uint8_t reserved[16];
   uint32_t crc;
 };
+// Version 3 (0.0.5): the pattern bank. This header, then each slot that is not empty, encoded
+// (slot_encode), in slot order; slot_bytes says how many bytes each took (0: empty, defaults).
+// The steps, length, swing and generator settings are each slot's; everything else is the project's.
+struct project3_t {
+  uint32_t magic;
+  uint16_t version, header_bytes;
+  uint32_t total_bytes;          // the header and every slot's bytes
+  uint16_t bpm;
+  uint8_t mut_strength, track_locks;
+  uint8_t kit[248];
+  uint8_t level[7], delay[7], reverb[7];
+  uint8_t mute, solo, route, master, sound_locks, kit_character, wildness, kit_amount;
+  uint8_t fx[32];
+  uint32_t kit_seed;
+  uint8_t rep_div, rep_mode, rep_curve, br_shape, br_mask, scene_quant, roll_target, pad4;
+  scene_t scenes[SCENES];
+  uint8_t cur, prev, quant, vary_strength, chain_len, chain_loop, chain_sel, pad5;
+  uint8_t chain_slot[16], chain_rep[16];
+  uint16_t slot_bytes[16];
+  uint8_t reserved[16];
+  uint32_t crc;                  // CRC-32 of the header up to here, then of every slot's bytes
+};
+static const int SLOT_HEAD = 12;  // a slot's bytes: last_page swing style density complexity enc count(2) seed(4)
+static const int SLOT_MAX = SLOT_HEAD + 7 * 64 * 4;
+// version 2 (0.0.3-0.0.4): one pattern; read, converted to slot 1, never written. (project_t above)
 // version 1 (CLATTER 12 0.0.2): read, converted, never written
 struct project_v1_t {
   uint32_t magic;
@@ -212,6 +248,8 @@ struct project_v1_t {
 static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay's lines (256 KB), after the tables' room
 static const int C12_PSRAM_UNDO_OFFSET = 384 * 1024;  // the undo history (64 KB reserved)
 static const int C12_PSRAM_UNDO_BYTES = 64 * 1024;
+static const int C12_PSRAM_IO_OFFSET = 448 * 1024;   // a save or load, as bytes (64 KB reserved)
+static const int C12_PSRAM_IO_BYTES = 64 * 1024;
 // REPEAT page: rates (row 4) and beat-repeat lengths (row 9), as c12 divisions
 static const uint8_t rep_rates[16] = {c12::c12x_div_4, c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_64, 0,
                                       c12::c12x_div_4t, c12::c12x_div_8t, c12::c12x_div_16t, c12::c12x_div_32t, 0,
@@ -249,6 +287,7 @@ struct snapshot_t {
   uint32_t cell[7][64];
   uint8_t last_page;
   uint8_t kit[247];
+  uint8_t slot, pad[3]; // the pattern slot the steps belong to
 };
 
 } // namespace c12glue
@@ -295,8 +334,8 @@ struct clatter12 : panel_t {
   uint8_t hist_at, hist_undo, hist_redo, last_undo_kind;
   uint32_t last_undo_us;
   // what was loaded or is about to be saved (and a version-1 file, before it is converted)
-  c12glue::project_t proj;
-  c12glue::project_v1_t proj_v1;
+  // the settings of a project just loaded (its patterns are in bank), applied by on_ui
+  c12glue::project3_t proj;
   panel_page_t save_page;
 
   // ---- TEMPO (row 15, every page) ----
@@ -333,6 +372,25 @@ struct clatter12 : panel_t {
   uint32_t scene_t0[c12glue::SCENES];
   bool scene_stored[c12glue::SCENES];
   uint8_t fx_bank; // FX page: 0 SPACE, 1 COLOUR
+  // ---- the pattern bank, the chain and the PATTERN overlay (saved: bank, cur, chain, quant) ----
+  c12glue::slot_t bank[c12glue::SLOTS];
+  c12glue::slot_t work;            // a slot being made (VARY, NEW, a copy): 1.8 KB, never on the stack
+  uint8_t cur, prev_slot;          // the slot playing (as the engine last said), the one before
+  uint32_t sw_seen, starts_seen, stops_seen; // the engine's counters, as last taken in
+  uint8_t quant;                   // C12_SWITCH_NOW, _BAR (default), _END
+  uint8_t vary_strength;           // VARY: 0 subtle, 1 medium, 2 wild (Pocket's mutation strengths)
+  uint16_t vary_takes;
+  uint8_t chain_slot[c12glue::CHAIN_MAX], chain_rep[c12glue::CHAIN_MAX];
+  uint8_t chain_len, chain_loop, chain_sel;
+  bool chain_on, ch_queued;
+  bool ch_owns_queue;              // what is queued in the engine was queued by the chain
+  int8_t ch_pos, ch_next;          // the entry playing; the one the next pattern start begins
+  uint8_t ch_left;                 // passes of the entry playing still to start
+  bool pat_overlay;                // open: rows 0-14 are the PATTERN overlay
+  int8_t slot_hold, op_hold, entry_hold; // pads held down on the overlay (-1 none)
+  bool slot_hold_used, op_hold_used, entry_hold_used;
+  uint32_t chain_clr_t0;
+  bool chain_clr_done;
 
   clatter12() {
     memset(verb_lines, 0, sizeof(verb_lines));
@@ -378,7 +436,6 @@ struct clatter12 : panel_t {
     last_undo_kind = c12glue::UNDO_OTHER;
     last_undo_us = 0;
     memset(&proj, 0, sizeof(proj));
-    memset(&proj_v1, 0, sizeof(proj_v1));
     tempo_t0 = tap_last = 0;
     memset(tap_times, 0, sizeof(tap_times));
     tap_count = tempo_overlay = tempo_tapped = 0;
@@ -410,6 +467,31 @@ struct clatter12 : panel_t {
     memset(scene_t0, 0, sizeof(scene_t0));
     memset(scene_stored, 0, sizeof(scene_stored));
     fx_bank = 0;
+    for (int i = 0; i < c12glue::SLOTS; i++) slot_defaults(bank[i]);
+    slot_defaults(work);
+    cur = 0;
+    prev_slot = 0xff;
+    sw_seen = starts_seen = stops_seen = 0;
+    quant = c12::C12_SWITCH_BAR;
+    vary_strength = 1;
+    vary_takes = 0;
+    memset(chain_slot, 0, sizeof(chain_slot));
+    memset(chain_rep, 1, sizeof(chain_rep));
+    chain_len = 0;
+    chain_loop = 1;
+    chain_sel = 0;
+    chain_on = ch_queued = ch_owns_queue = false;
+    ch_pos = 0;
+    ch_next = -1;
+    ch_left = 0;
+    pat_overlay = false;
+    slot_hold = op_hold = entry_hold = -1;
+    slot_hold_used = op_hold_used = entry_hold_used = false;
+    chain_clr_t0 = 0;
+    chain_clr_done = false;
+    filled = 0;
+    filled_dirty = true;
+    lock_depth = 0;
     memset(meter, 0, sizeof(meter));
     memset(space_meter, 0, sizeof(space_meter));
     memset(&prof_acc, 0, sizeof(prof_acc));
@@ -473,13 +555,16 @@ struct clatter12 : panel_t {
   }
 
   void default_beat() {
-    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
+    c12::pocket_pattern *p = edit_begin();
     memset(p, 0, sizeof(*p));
     for (int s = 0; s < 16; s += 4) p->cell[0][s] = c12::c12x_cell(110, 0);
     p->cell[3][4] = p->cell[3][12] = c12::c12x_cell(105, 0);
     for (int s = 2; s < 16; s += 4) p->cell[5][s] = c12::c12x_cell(80, 0);
     p->last_page = 0;
-    c12::pocket_seq_edit_commit();
+    edit_commit();
+    c12::c12_seq_set_live_slot(0);
+    cur = 0;
+    filled_dirty = true;
   }
 
   // ------------------------------------------------------------------ audio (core 1)
@@ -612,17 +697,30 @@ struct clatter12 : panel_t {
   }
 
   // ---- undo / redo: a ring of snapshots of the steps, the length and the kit ----
-  void take(c12glue::snapshot_t &s) {
-    const c12::pocket_pattern *p = c12::pocket_seq_pattern();
+  // a snapshot of a slot's steps (the pattern playing, if it is that slot) and the kit
+  void take(c12glue::snapshot_t &s) { take_slot(s, cur); }
+  void take_slot(c12glue::snapshot_t &s, int slot) {
+    bank_sync();
+    seq_lock();
+    const c12::pocket_pattern *p = slot == cur ? c12::pocket_seq_pattern() : &bank[slot].pat;
     memcpy(s.cell, p->cell, sizeof(s.cell));
     s.last_page = p->last_page;
+    seq_unlock();
     memcpy(s.kit, kit, sizeof(s.kit));
+    s.slot = (uint8_t)slot;
   }
   void restore(const c12glue::snapshot_t &s) {
-    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
-    memcpy(p->cell, s.cell, sizeof(s.cell));
-    p->last_page = s.last_page;
-    c12::pocket_seq_edit_commit();
+    const int slot = s.slot < c12glue::SLOTS ? s.slot : cur;
+    if (slot == cur) {
+      c12::pocket_pattern *p = edit_begin();
+      memcpy(p->cell, s.cell, sizeof(s.cell));
+      p->last_page = s.last_page;
+      edit_commit();
+    } else {
+      memcpy(bank[slot].pat.cell, s.cell, sizeof(s.cell));
+      bank[slot].pat.last_page = s.last_page;
+      show_ripple(slot, 0 + oy, WHITE);
+    }
     memcpy(kit, s.kit, sizeof(s.kit));
     apply_kit();
   }
@@ -651,23 +749,378 @@ struct clatter12 : panel_t {
     using namespace c12glue;
     if (!hist || !hist_undo) return;
     hist_at = (uint8_t)((hist_at + UNDO_DEPTH - 1) % UNDO_DEPTH);
-    take(scratch);
+    take_slot(scratch, hist[hist_at].slot < SLOTS ? hist[hist_at].slot : cur);
     restore(hist[hist_at]);
     hist[hist_at] = scratch; // what redo returns to
     hist_undo--;
     hist_redo++;
     last_undo_kind = UNDO_OTHER;
   }
+  // before a change to another slot of the bank (copy, clear, a variation into it): never merged
+  void push_undo_slot(int slot) {
+    using namespace c12glue;
+    if (!hist) return;
+    take_slot(hist[hist_at], slot);
+    hist_at = (uint8_t)((hist_at + 1) % UNDO_DEPTH);
+    if (hist_undo < UNDO_DEPTH) hist_undo++;
+    hist_redo = 0;
+    last_undo_kind = UNDO_OTHER;
+  }
   void redo() {
     using namespace c12glue;
     if (!hist || !hist_redo) return;
-    take(scratch);
+    take_slot(scratch, hist[hist_at].slot < SLOTS ? hist[hist_at].slot : cur);
     restore(hist[hist_at]);
     hist[hist_at] = scratch;
     hist_at = (uint8_t)((hist_at + 1) % UNDO_DEPTH);
     hist_redo--;
     hist_undo++;
     last_undo_kind = UNDO_OTHER;
+  }
+
+
+  // ================================================================== the pattern bank
+  // Sixteen slots. The slot playing (cur) lives in the engine (Pocket's pattern) and is edited
+  // there; bank[cur] is brought up to date from it whenever the bank is used (flush). The others
+  // are only here. A switch is queued in the engine (c12_seq_queue), which makes it on the step
+  // asked for; every write of the sequencer's pattern from here holds the pattern lock (seq_lock),
+  // and bank_sync, first, takes in a switch the engine has made: the pattern it replaced (with every
+  // edit made to it until the switch) goes back to its slot.
+  int lock_depth;
+  void seq_lock() {
+    if (!lock_depth++) c12::c12_seq_lock();
+  }
+  void seq_unlock() {
+    if (lock_depth && !--lock_depth) c12::c12_seq_unlock();
+  }
+  c12::pocket_pattern *edit_begin() {
+    bank_sync();
+    seq_lock();
+    return c12::pocket_seq_edit_begin();
+  }
+  void edit_commit() {
+    c12::pocket_seq_edit_commit();
+    seq_unlock();
+  }
+  void seq_cell(int t, int s, uint32_t c) {
+    bank_sync();
+    seq_lock();
+    c12::pocket_seq_set_cell(t, s, c);
+    seq_unlock();
+  }
+  void seq_last_page(unsigned lp) {
+    bank_sync();
+    seq_lock();
+    c12::pocket_seq_set_last_page(lp);
+    seq_unlock();
+  }
+  void set_swing(int v) {
+    c12::pocket_seq_set_swing(v);
+    bank[cur].swing = (uint8_t)c12::pocket_seq_swing();
+  }
+  // the slot's own generator settings follow it (GEN page)
+  void slot_meta_store(int i) {
+    c12glue::slot_t &b = bank[i];
+    b.swing = (uint8_t)c12::pocket_seq_swing();
+    b.style = style;
+    b.density = density;
+    b.complexity = complexity;
+    b.gen_seed = gen_seed;
+  }
+  void slot_meta_load(int i) {
+    const c12glue::slot_t &b = bank[i];
+    style = (uint8_t)(b.style % c12::c12x_gen_styles);
+    density = (uint8_t)clampi(b.density, 0, 100);
+    complexity = (uint8_t)clampi(b.complexity, 0, 100);
+    gen_seed = b.gen_seed;
+    mut_count = 0;
+  }
+  static void slot_defaults(c12glue::slot_t &b) {
+    memset(&b, 0, sizeof(b));
+    b.swing = 50;
+    b.density = 50;
+    b.complexity = 50;
+    b.gen_seed = 1;
+  }
+  // take in a switch the engine made since the last look (core 0, any time)
+  void bank_sync() {
+    if (!c12glue::g_ready || lock_depth) return;
+    const uint32_t sw = c12::c12_seq_switches();
+    if (sw == sw_seen) return;
+    seq_lock();
+    slot_meta_store(cur); // (its swing is the new one's now: kept from when it was set)
+    const uint8_t keep_swing = bank[cur].swing;
+    bank[cur].pat = *c12::pocket_seq_replaced();
+    bank[cur].swing = keep_swing;
+    seq_unlock();
+    prev_slot = cur;
+    cur = (uint8_t)(c12::c12_seq_live_slot() % c12glue::SLOTS);
+    sw_seen = sw;
+    bank[cur].swing = (uint8_t)c12::pocket_seq_swing();
+    slot_meta_load(cur);
+    sel_track = sel_step = -1;
+    alt_strength = 0; // a MUTATE held through the switch plays a mutation of the new pattern
+    filled_dirty = true;
+  }
+  // bank[cur] from the pattern playing
+  void flush() {
+    bank_sync();
+    seq_lock();
+    bank[cur].pat = *c12::pocket_seq_pattern();
+    seq_unlock();
+    slot_meta_store(cur);
+  }
+  // which slots have steps (the playing one from the engine): a mask, recomputed when it may change
+  uint16_t filled;
+  bool filled_dirty;
+  static bool has_steps(const c12::pocket_pattern &p) {
+    for (int t = 0; t < c12glue::TRACKS; t++)
+      for (int st = 0; st < 64; st++)
+        if (p.cell[t][st] & 0x7fu) return true;
+    return false;
+  }
+  uint16_t filled_mask() {
+    if (filled_dirty) {
+      filled = 0;
+      for (int i = 0; i < c12glue::SLOTS; i++)
+        if (i != cur && has_steps(bank[i].pat)) filled |= (uint16_t)(1u << i);
+      filled_dirty = false;
+    }
+    const uint16_t live = has_steps(*c12::pocket_seq_pattern()) ? (uint16_t)(1u << cur) : 0;
+    return (uint16_t)((filled & ~(1u << cur)) | live);
+  }
+  int queued_slot() {
+    unsigned q = 0;
+    const unsigned m = c12::c12_seq_queued(&q);
+    return m && m != c12::C12_SWITCH_STOP ? (int)q : -1;
+  }
+  // put slot i in place at once (stopped, or a seamless duplicate)
+  void slot_now(int i) {
+    flush();
+    c12::c12_seq_cancel();
+    seq_lock();
+    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
+    *p = bank[i].pat;
+    c12::pocket_seq_edit_commit();
+    c12::pocket_seq_set_swing(bank[i].swing);
+    c12::c12_seq_set_live_slot((unsigned)i);
+    seq_unlock();
+    if (i != cur) prev_slot = cur;
+    cur = (uint8_t)i;
+    slot_meta_load(i);
+    sel_track = sel_step = -1;
+    alt_strength = 0;
+    filled_dirty = true;
+  }
+  // play slot i: at once when stopped, else at the QUANT point (mode 0: QUANT). The slot playing,
+  // picked again, cancels what is queued; the slot queued, picked again, too.
+  void select_slot(int i, int mode = 0) {
+    bank_sync();
+    if (stopped()) {
+      slot_now(i);
+      return;
+    }
+    const int q = queued_slot();
+    if (q == i || (i == cur && q >= 0)) {
+      c12::c12_seq_cancel();
+      return;
+    }
+    if (i == cur) return;
+    flush();
+    c12::c12_seq_queue(&bank[i].pat, (unsigned)i, bank[i].swing, (unsigned)(mode ? mode : quant));
+    ch_owns_queue = false;
+  }
+  // the next slot after the one playing that has no steps (and is not queued), or -1
+  int next_empty() {
+    const uint16_t f = filled_mask();
+    const int q = queued_slot();
+    for (int k = 1; k < c12glue::SLOTS; k++) {
+      const int i = (cur + k) % c12glue::SLOTS;
+      if (!(f >> i & 1) && i != q) return i;
+    }
+    return -1;
+  }
+  // write a pattern into slot i (undoable); the slot playing is written in the engine
+  void slot_write(int i, const c12::pocket_pattern &pat, const c12glue::slot_t *meta) {
+    push_undo_slot(i);
+    if (i == cur) {
+      c12::pocket_pattern *p = edit_begin();
+      *p = pat;
+      edit_commit();
+    } else {
+      bank[i].pat = pat;
+    }
+    if (meta) {
+      bank[i].swing = meta->swing;
+      bank[i].style = meta->style;
+      bank[i].density = meta->density;
+      bank[i].complexity = meta->complexity;
+      bank[i].gen_seed = meta->gen_seed;
+      if (i == cur) {
+        set_swing(meta->swing);
+        slot_meta_load(i);
+      }
+    }
+    filled_dirty = true;
+  }
+  void slot_copy(int from, int to) {
+    if (from == to) return;
+    flush();
+    work = bank[from];
+    slot_write(to, work.pat, &work);
+    show_ripple(to, 0 + oy, WHITE);
+  }
+  void slot_clear(int i) {
+    flush();
+    slot_defaults(work);
+    slot_write(i, work.pat, &work);
+    show_ripple(i, 0 + oy, RED);
+  }
+  // DUP: the pattern playing into slot `to` (or the next empty), and it plays from there at once:
+  // the same steps, so nothing is heard to change, and the original stays as it was
+  void op_dup(int to) {
+    if (to < 0) to = next_empty();
+    if (to < 0 || to == cur) { show_ripple(0, 4 + oy, RED); return; }
+    slot_copy(cur, to);
+    if (stopped()) slot_now(to);
+    else {
+      flush();
+      c12::c12_seq_queue(&bank[to].pat, (unsigned)to, bank[to].swing, c12::C12_SWITCH_NOW);
+    }
+  }
+  // VARY: a variation of the pattern playing (Pocket's mutation, locked tracks kept) into `to`
+  // (or the next empty, then queued at QUANT); the original is untouched
+  void op_vary(int to) {
+    const bool play = to < 0;
+    if (to < 0) to = next_empty();
+    if (to < 0) { show_ripple(3, 4 + oy, RED); return; }
+    flush();
+    c12glue::slot_t &v = work;
+    v = bank[cur];
+    c12::pocket_gen_mutate(&v.pat, (gen_seed << 16) ^ (0x7a71u + ++vary_takes), vary_strength, track_locks);
+    slot_write(to, v.pat, &v);
+    show_ripple(to, 0 + oy, LED_RGB(0, 31, 18));
+    if (play) select_slot(to);
+  }
+  // NEW: a new pattern from the generator (GEN's style, density, complexity), into `to` or the next empty
+  void op_new(int to) {
+    const bool play = to < 0;
+    if (to < 0) to = next_empty();
+    if (to < 0) { show_ripple(6, 4 + oy, RED); return; }
+    flush();
+    c12glue::slot_t &v = work;
+    v = bank[cur];
+    v.gen_seed = next_random() & 0xffffu;
+    c12::pocket_gen_settings gs;
+    gs.seed = v.gen_seed;
+    gs.density = density;
+    gs.complexity = complexity;
+    gs.style = style;
+    gs.locks = 0;
+    gs.last_page = v.pat.last_page;
+    memset(&v.pat, 0, sizeof(v.pat));
+    v.pat.last_page = gs.last_page;
+    c12::pocket_gen_generate(&v.pat, &gs);
+    slot_write(to, v.pat, &v);
+    show_ripple(to, 0 + oy, LED_RGB(14, 31, 0));
+    if (play) select_slot(to);
+  }
+  // BACK: the slot played before this one, at the next step (at once when stopped)
+  void op_back() {
+    if (prev_slot >= c12glue::SLOTS || prev_slot == cur) return;
+    select_slot(prev_slot, c12::C12_SWITCH_NOW);
+  }
+
+  // ---- the chain: up to sixteen entries, each a slot played a number of times ----
+  int next_entry(int e) const {
+    if (e + 1 < chain_len) return e + 1;
+    return chain_loop ? 0 : -1;
+  }
+  // the chain stops leading (CHAIN off, or a slot picked by hand): what it queued is cancelled
+  void chain_off() {
+    if (ch_owns_queue) c12::c12_seq_cancel();
+    ch_owns_queue = false;
+    chain_on = false;
+  }
+  void chain_reset() {
+    ch_owns_queue = false;
+    ch_pos = 0;
+    ch_left = 0;
+    ch_next = -1;
+    ch_queued = false;
+    starts_seen = c12::c12_seq_starts();
+    stops_seen = c12::c12_seq_stops();
+  }
+  // start the chain at entry e: stopped, its slot now (PLAY plays it); playing, at QUANT (a bar at
+  // the soonest: an entry is counted in whole passes)
+  void chain_jump(int e) {
+    if (e < 0 || e >= chain_len) return;
+    chain_on = true;
+    starts_seen = c12::c12_seq_starts();
+    stops_seen = c12::c12_seq_stops();
+    ch_next = (int8_t)e;
+    ch_left = 0;
+    ch_queued = true;
+    const int slot = chain_slot[e];
+    if (stopped()) slot_now(slot);
+    else if (slot != cur) select_slot(slot, quant == c12::C12_SWITCH_NOW ? (int)c12::C12_SWITCH_BAR : (int)quant);
+    else c12::c12_seq_cancel(); // the slot is playing: the entry starts with its next pass
+  }
+  // every frame: count the passes, and queue what follows an entry's last pass, for its end
+  // the engine stopped at the chain's end (ONCE): Plinky's transport stops too. Before the transport
+  // is followed in on_ui, or it would start the sequencer again.
+  void chain_stop_check() {
+    const uint32_t stops = c12::c12_seq_stops();
+    if (stops == stops_seen) return;
+    stops_seen = stops;
+    if (is_transport_playing()) stop_transport();
+    chain_reset();
+  }
+  void chain_update() {
+    if (!chain_on || !chain_len) return;
+    const uint32_t st = c12::c12_seq_starts();
+    if (stopped()) {
+      starts_seen = st;
+      return;
+    }
+    while (starts_seen != st) {
+      starts_seen++;
+      if (ch_next >= 0) {
+        ch_pos = ch_next;
+        ch_next = -1;
+        ch_left = chain_rep[ch_pos];
+      } else if (ch_left == 0) {
+        const int n = next_entry(ch_pos);
+        ch_pos = (int8_t)(n < 0 ? 0 : n);
+        ch_left = chain_rep[ch_pos];
+      }
+      if (ch_left) ch_left--;
+      ch_queued = false;
+    }
+    if (!ch_queued && ch_left == 0 && ch_next < 0) {
+      const int n = next_entry(ch_pos);
+      ch_queued = true;
+      if (n < 0) {
+        c12::c12_seq_queue(nullptr, cur, (unsigned)c12::pocket_seq_swing(), c12::C12_SWITCH_STOP);
+        ch_owns_queue = true;
+        return;
+      }
+      ch_next = (int8_t)n;
+      const int slot = chain_slot[n];
+      if (slot != cur) {
+        flush();
+        c12::c12_seq_queue(&bank[slot].pat, (unsigned)slot, bank[slot].swing, c12::C12_SWITCH_END);
+        ch_owns_queue = true;
+      }
+    }
+  }
+  // PLAY with the chain on: from its first entry
+  void chain_on_play() {
+    if (!chain_on || !chain_len) return;
+    chain_reset();
+    slot_now(chain_slot[0]);
+    ch_next = 0;
+    ch_queued = true;
   }
 
   // ---- patterns ----
@@ -686,35 +1139,35 @@ struct clatter12 : panel_t {
     gen_seed = next_random() & 0xffffu;
     mut_count = 0;
     c12::pocket_gen_settings s = gen_settings();
-    c12::pocket_gen_generate(c12::pocket_seq_edit_begin(), &s);
-    c12::pocket_seq_edit_commit();
+    c12::pocket_gen_generate(edit_begin(), &s);
+    edit_commit();
     sel_track = sel_step = -1;
   }
   void mutate(uint32_t now) {
     push_undo(c12glue::UNDO_OTHER, now);
-    c12::pocket_gen_mutate(c12::pocket_seq_edit_begin(), (gen_seed << 16) | mut_count++, mut_strength, track_locks);
-    c12::pocket_seq_edit_commit();
+    c12::pocket_gen_mutate(edit_begin(), (gen_seed << 16) | mut_count++, mut_strength, track_locks);
+    edit_commit();
   }
   void generate_track(int t, uint32_t now) {
     push_undo(c12glue::UNDO_OTHER, now);
     c12::pocket_gen_settings s = gen_settings();
-    c12::pocket_gen_track(c12::pocket_seq_edit_begin(), &s, (unsigned)t, ++track_takes);
-    c12::pocket_seq_edit_commit();
+    c12::pocket_gen_track(edit_begin(), &s, (unsigned)t, ++track_takes);
+    edit_commit();
   }
   void clear_all(uint32_t now) {
     push_undo(c12glue::UNDO_OTHER, now);
-    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
+    c12::pocket_pattern *p = edit_begin();
     memset(p->cell, 0, sizeof(p->cell));
-    c12::pocket_seq_edit_commit();
+    edit_commit();
     sel_track = sel_step = -1;
   }
   void copy_page(int from, int to, uint32_t now) {
     if (from == to) return;
     push_undo(c12glue::UNDO_OTHER, now);
-    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
+    c12::pocket_pattern *p = edit_begin();
     for (int t = 0; t < c12glue::TRACKS; ++t)
       for (int s = 0; s < c12glue::STEPS; ++s) p->cell[t][to * 16 + s] = p->cell[t][from * 16 + s];
-    c12::pocket_seq_edit_commit();
+    edit_commit();
   }
 
   // ---- kits: real generation (c12_kitgen on Pocket's designer), never a preset list ----
@@ -748,7 +1201,7 @@ struct clatter12 : panel_t {
   void set_cell(int t, int s, uint32_t c, uint32_t now) {
     if (cell_at(t, s) == c) return;
     push_undo(c12glue::UNDO_STEPS, now);
-    c12::pocket_seq_set_cell(t, s, c);
+    seq_cell(t, s, c);
   }
   // the selected step and every other lit step held down: what the editor rows change
   template <typename F> void for_edited_steps(F f) {
@@ -830,7 +1283,7 @@ struct clatter12 : panel_t {
       int x = s - view_page * 16;
       if (x >= 0 && x < STEPS && press[t][x].active && press[t][x].was_on && !press[t][x].edited) {
         uint32_t c = cell_at(t, s);
-        c12::pocket_seq_set_cell(t, s, c12::c12x_cell_with_velocity(c, press[t][x].start_vel));
+        seq_cell(t, s, c12::c12x_cell_with_velocity(c, press[t][x].start_vel));
       }
     };
     for (int x = 0; x < 16; ++x) {
@@ -924,10 +1377,10 @@ struct clatter12 : panel_t {
     for (int x = 4; x < 8; ++x)
       if (pressed(x, 14)) {
         push_undo(UNDO_OTHER, now);
-        c12::pocket_seq_set_last_page((unsigned)(x - 4));
+        seq_last_page((unsigned)(x - 4));
       }
     for (int x = 8; x < 16; ++x)
-      if (pressed(x, 14)) c12::pocket_seq_set_swing(swing_levels[x - 8]);
+      if (pressed(x, 14)) set_swing(swing_levels[x - 8]);
     // y15 x9-11: GEN, MUT, CLR (hold)
     if (pressed(9, 15)) generate(now);
     if (pressed(10, 15)) mutate(now);
@@ -1429,7 +1882,7 @@ struct clatter12 : panel_t {
     using namespace c12glue;
     const perf_t p = perf_now();
     push_undo(UNDO_OTHER, now);
-    c12::pocket_pattern *pat = c12::pocket_seq_edit_begin();
+    c12::pocket_pattern *pat = edit_begin();
     const int steps = c12::c12x_pattern_steps(pat);
     if (p.mutate && alt_strength)
       for (int t = 0; t < TRACKS; t++) memcpy(pat->cell[t], alt[alt_live].cell[t], sizeof(pat->cell[t]));
@@ -1443,7 +1896,7 @@ struct clatter12 : panel_t {
           pat->cell[t][st] = c12::c12_perf_cell(t, st, 0, base[t][st], bar_hits, p.fill, p.density);
         }
     }
-    c12::pocket_seq_edit_commit();
+    edit_commit();
     mute = (uint8_t)((mute | p.mute | p.kill) & 0x7f);
     if (p.solo) solo = p.solo;
     release_all_perf();
@@ -1607,6 +2060,12 @@ struct clatter12 : panel_t {
         }
       }
       if (pressed(9, 10)) scene_quant = !scene_quant;
+      // y11: the pattern slots, to play one (as on the PATTERN overlay; a pick pauses the chain)
+      for (int i = 0; i < SLOTS; i++)
+        if (pressed(i, 11)) {
+          if (chain_on && !stopped()) chain_off();
+          select_slot(i);
+        }
       perf_row15(now, true);
       return;
     }
@@ -1657,6 +2116,11 @@ struct clatter12 : panel_t {
       led(i, 10, c);
     }
     led(9, 10, scene_quant ? LED_RGB(20, 20, 20) : LED_RGB(3, 3, 3));
+    {
+      const uint16_t f = filled_mask();
+      const int q = queued_slot();
+      for (int i = 0; i < SLOTS; i++) led(i, 11, slot_led(i, f, q, now));
+    }
     draw_bar_position(13);
     draw_meters(14);
     draw_perf_row15(now, true);
@@ -1785,6 +2249,207 @@ struct clatter12 : panel_t {
     draw_perf_row15(now, false);
   }
 
+  // ================================================================== PATTERN overlay
+  // Opened and closed by tapping the lit pad of the page shown (row 15), on any page but SAVE: the
+  // page stays underneath. docs/DESIGN.md "Patterns":
+  //   y0   SLOTS 1-16: tap plays it (at QUANT when playing; again: cancel). Hold one, tap another: copy
+  //   y1   where the pattern playing is (its length across the row)
+  //   y3   QUANT: NOW BAR END  |  x5-7 VARY strength: subtle medium wild
+  //   y4   DUP (x0-1)  VARY (x3-4)  NEW (x6-7)  BACK (x9-10)  CLEAR (x13-14, hold + tap a slot)
+  //        tap DUP/VARY/NEW: into the next empty slot and play it; hold + tap a slot: into that slot
+  //   y6   CHAIN entries: tap selects (chain on: jumps there); hold one + tap a slot: set it
+  //   y7   REPEATS of the selected entry, 1-16
+  //   y8   CHAIN on/off (x0), LOOP/ONCE (x1), ADD the slot playing (x3), DEL the selected (x4),
+  //        CLEAR CHAIN (x14-15, hold)
+  static uint32_t slot_col(int i) {
+    static const uint8_t r[16] = {31, 31, 31, 24, 12, 2, 0, 0, 0, 0, 0, 8, 18, 28, 31, 31};
+    static const uint8_t g[16] = {4, 14, 26, 31, 31, 31, 31, 26, 16, 8, 2, 0, 0, 0, 0, 2};
+    static const uint8_t b[16] = {0, 0, 0, 0, 0, 4, 14, 26, 31, 31, 31, 31, 31, 31, 20, 8};
+    return LED_RGB(r[i & 15], g[i & 15], b[i & 15]);
+  }
+  int op_at(int x) const {
+    if (x <= 1) return c12glue::OP_DUP;
+    if (x >= 3 && x <= 4) return c12glue::OP_VARY;
+    if (x >= 6 && x <= 7) return c12glue::OP_NEW;
+    if (x >= 9 && x <= 10) return c12glue::OP_BACK;
+    if (x >= 13 && x <= 14) return c12glue::OP_CLEAR;
+    return c12glue::OP_NONE;
+  }
+  void slot_pad(int i) {
+    using namespace c12glue;
+    // a pad held on the ops row, or a chain entry held, makes a slot tap its target
+    if (op_hold >= 0) {
+      op_hold_used = true;
+      switch (op_hold) {
+      case OP_DUP: if (i != cur) slot_copy(cur, i); break;
+      case OP_VARY: op_vary(i); break;
+      case OP_NEW: op_new(i); break;
+      case OP_CLEAR: slot_clear(i); break;
+      default: break;
+      }
+      return;
+    }
+    if (entry_hold >= 0) {
+      entry_hold_used = true;
+      if (entry_hold >= chain_len && chain_len < CHAIN_MAX) entry_hold = (int8_t)chain_len++;
+      chain_slot[entry_hold] = (uint8_t)i;
+      if (!chain_rep[entry_hold]) chain_rep[entry_hold] = 1;
+      chain_sel = (uint8_t)entry_hold;
+      return;
+    }
+    if (slot_hold >= 0 && slot_hold != i) {
+      slot_copy(slot_hold, i);
+      slot_hold_used = true;
+      return;
+    }
+    slot_hold = (int8_t)i;
+    slot_hold_used = false;
+  }
+  void pattern_overlay_touch(uint32_t now) {
+    using namespace c12glue;
+    for (int i = 0; i < SLOTS; i++)
+      if (pressed(i, 0)) slot_pad(i);
+    // a slot let go without having been a copy's source: it plays (a manual pick pauses the chain)
+    if (slot_hold >= 0 && !down(slot_hold, 0)) {
+      if (!slot_hold_used) {
+        if (chain_on && !stopped()) chain_off();
+        select_slot(slot_hold);
+      }
+      slot_hold = -1;
+    }
+    for (int x = 0; x < 3; x++)
+      if (pressed(x, 3)) quant = (uint8_t)(c12::C12_SWITCH_NOW + x);
+    for (int x = 0; x < 3; x++)
+      if (pressed(5 + x, 3)) vary_strength = (uint8_t)x;
+    for (int x = 0; x < 16; x++)
+      if (pressed(x, 4)) {
+        const int op = op_at(x);
+        if (op == OP_BACK) op_back();
+        else if (op != OP_NONE) { op_hold = (int8_t)op; op_hold_used = false; }
+      }
+    if (op_hold >= 0) {
+      bool held = false;
+      for (int x = 0; x < 16; x++) held = held || (op_at(x) == op_hold && down(x, 4));
+      if (!held) {
+        if (!op_hold_used) {
+          if (op_hold == OP_DUP) op_dup(-1);
+          else if (op_hold == OP_VARY) op_vary(-1);
+          else if (op_hold == OP_NEW) op_new(-1);
+          // CLEAR alone does nothing: it needs a slot
+        }
+        op_hold = -1;
+      }
+    }
+    // the chain
+    for (int e = 0; e < CHAIN_MAX; e++)
+      if (pressed(e, 6)) { entry_hold = (int8_t)e; entry_hold_used = false; }
+    if (entry_hold >= 0 && !down(entry_hold, 6)) {
+      if (!entry_hold_used && entry_hold < chain_len) {
+        chain_sel = (uint8_t)entry_hold;
+        if (chain_on && !stopped()) chain_jump(entry_hold);
+      }
+      entry_hold = -1;
+    }
+    if (chain_sel < chain_len)
+      for (int x = 0; x < 16; x++)
+        if (pressed(x, 7)) chain_rep[chain_sel] = (uint8_t)(x + 1);
+    if (pressed(0, 8)) {
+      if (chain_on) chain_off();
+      else if (chain_len) {
+        if (stopped()) { chain_jump(chain_sel < chain_len ? chain_sel : 0); }
+        else chain_jump(chain_sel < chain_len ? chain_sel : 0);
+      }
+    }
+    if (pressed(1, 8)) chain_loop = !chain_loop;
+    if (pressed(3, 8) && chain_len < CHAIN_MAX) {
+      chain_slot[chain_len] = cur;
+      chain_rep[chain_len] = 1;
+      chain_sel = chain_len++;
+    }
+    if (pressed(4, 8) && chain_sel < chain_len) {
+      for (int e = chain_sel; e + 1 < chain_len; e++) {
+        chain_slot[e] = chain_slot[e + 1];
+        chain_rep[e] = chain_rep[e + 1];
+      }
+      chain_len--;
+      if (chain_sel >= chain_len && chain_sel) chain_sel--;
+      if (!chain_len) chain_off();
+      if (ch_pos >= chain_len) ch_pos = 0;
+    }
+    if (pressed(14, 8) || pressed(15, 8)) { chain_clr_t0 = now; chain_clr_done = false; }
+    if ((down(14, 8) || down(15, 8)) && chain_clr_t0 && !chain_clr_done && now - chain_clr_t0 >= CHAIN_CLEAR_US) {
+      chain_len = 0;
+      chain_sel = 0;
+      chain_off();
+      chain_clr_done = true;
+      show_ripple(14, 8 + oy, RED);
+    }
+    if (!down(14, 8) && !down(15, 8)) chain_clr_t0 = 0;
+  }
+  // a slot's pad, wherever slots are shown (overlay row 0, PERFORM row 11)
+  uint32_t slot_led(int i, uint16_t f, int q, uint32_t now) {
+    uint32_t c = (f >> i & 1) ? fade_col(slot_col(i), 120) : LED_RGB(2, 2, 2);
+    if (i == cur) c = WHITE;
+    if (i == q) c = ((now >> 17) & 1) ? slot_col(i) : DIMMEST(slot_col(i)); // queued: blinks
+    if (i == slot_hold) c = add_col(c, LED_RGB(10, 10, 10));
+    return c;
+  }
+  void draw_pattern_overlay(uint32_t now) {
+    using namespace c12glue;
+    const uint16_t f = filled_mask();
+    const int q = queued_slot();
+    for (int i = 0; i < SLOTS; i++) led(i, 0, slot_led(i, f, q, now));
+    // y1: where the pattern playing is, across its length
+    const int pos = c12::pocket_seq_position();
+    const int steps = c12::c12x_pattern_steps(c12::pocket_seq_pattern());
+    const bool playing = c12::pocket_seq_playing() && pos != c12::c12x_not_playing;
+    const int at = playing ? pos * 16 / steps : -1;
+    for (int x = 0; x < 16; x++) led(x, 1, x == at ? slot_col(cur) : x < at ? DIMMEST(slot_col(cur)) : LED_RGB(1, 1, 1));
+    static const uint32_t qcol[3] = {LED_RGB(31, 12, 0), LED_RGB(31, 31, 31), LED_RGB(0, 18, 31)};
+    for (int x = 0; x < 3; x++) led(x, 3, quant == c12::C12_SWITCH_NOW + x ? qcol[x] : DIMMEST(qcol[x]));
+    for (int x = 0; x < 3; x++) led(5 + x, 3, vary_strength == x ? fade_col(COL_MUTATE, 140 + 58 * x) : faint(COL_MUTATE));
+    static const uint32_t opcol[OPS] = {LED_RGB(0, 24, 31), LED_RGB(0, 31, 14), LED_RGB(14, 31, 0), LED_RGB(8, 8, 31), LED_RGB(10, 0, 0)};
+    for (int x = 0; x < 16; x++) {
+      const int op = op_at(x);
+      if (op == OP_NONE) continue;
+      uint32_t c = op == op_hold ? WHITE : opcol[op];
+      if (op == OP_BACK && (prev_slot >= SLOTS || prev_slot == cur)) c = DIMMEST(c);
+      led(x, 4, c);
+    }
+    // the chain
+    for (int e = 0; e < CHAIN_MAX; e++) {
+      uint32_t c = 0;
+      if (e < chain_len) {
+        c = fade_col(slot_col(chain_slot[e]), 110);
+        if (chain_on && e == ch_pos && playing) c = WHITE;
+        if (chain_on && e == ch_next && ((now >> 17) & 1)) c = slot_col(chain_slot[e]);
+        if (e == chain_sel) c = add_col(c, LED_RGB(6, 6, 6));
+      } else if (e == chain_len) {
+        c = LED_RGB(1, 1, 1); // where ADD (or a held empty entry and a slot) appends
+      }
+      if (e == entry_hold) c = add_col(c, LED_RGB(10, 10, 10));
+      led(e, 6, c);
+    }
+    if (chain_sel < chain_len) {
+      const int rep = chain_rep[chain_sel];
+      const bool here = chain_on && playing && chain_sel == ch_pos;
+      const int done = here ? rep - ch_left : 0; // passes started
+      for (int x = 0; x < 16; x++) {
+        uint32_t c = x < rep ? fade_col(slot_col(chain_slot[chain_sel]), 90) : LED_RGB(1, 1, 1);
+        if (here && x < done) c = WHITE;
+        led(x, 7, c);
+      }
+    }
+    led(0, 8, chain_on ? LED_RGB(0, 31, 0) : (chain_len ? LED_RGB(0, 6, 0) : LED_RGB(1, 2, 1)));
+    led(1, 8, chain_loop ? LED_RGB(0, 24, 31) : LED_RGB(31, 14, 0));
+    led(3, 8, chain_len < CHAIN_MAX ? LED_RGB(10, 10, 10) : LED_RGB(1, 1, 1));
+    led(4, 8, chain_sel < chain_len ? LED_RGB(10, 2, 2) : LED_RGB(1, 1, 1));
+    uint32_t cc = LED_RGB(8, 0, 0);
+    if (chain_clr_t0 && !chain_clr_done) cc = lerp_col(cc, LED_RGB(31, 0, 0), clampi((int)((now - chain_clr_t0) * 256 / CHAIN_CLEAR_US), 0, 256));
+    led(14, 8, cc);
+    led(15, 8, cc);
+  }
+
   // ================================================================== TEMPO (row 15 x8 on every page)
   // tap: tap tempo (from the second tap; a pause of 2 s starts again). Hold: the overlay below,
   // for as long as it is held, over the page's rows 0-14. Plinky's own tempo is set
@@ -1885,7 +2550,16 @@ struct clatter12 : panel_t {
   void nav_and_transport(int page) {
     using namespace c12glue;
     for (int p = 0; p < PAGES; ++p)
-      if (pressed(p, 15) && p != page) scroll_to_page(p);
+      if (pressed(p, 15)) {
+        if (p != page) {
+          scroll_to_page(p);
+          pat_overlay = false;
+        } else if (page != PAGE_SAVE) {
+          // the lit pad of the page shown: the PATTERN overlay, open or closed
+          pat_overlay = !pat_overlay;
+          slot_hold = op_hold = entry_hold = -1;
+        }
+      }
     if (pressed(12, 15)) undo();
     if (pressed(13, 15)) redo();
     if (pressed(14, 15)) stop_transport();
@@ -1904,7 +2578,11 @@ struct clatter12 : panel_t {
   void draw_nav(int page, uint32_t now) {
     using namespace c12glue;
     const bool playing = c12::pocket_seq_playing() != 0;
-    for (int p = 0; p < PAGES; ++p) led(p, 15, p == page ? WHITE : faint(page_col[p]));
+    // the page shown is lit white (the PATTERN overlay open: in its colour); a pattern queued to
+    // play makes it blink amber, on every page
+    const bool q = c12::c12_seq_queued(nullptr) != c12::C12_SWITCH_NONE && ((now >> 17) & 1);
+    for (int p = 0; p < PAGES; ++p)
+      led(p, 15, p == page ? (q ? LED_RGB(31, 18, 0) : pat_overlay ? LED_RGB(0, 31, 24) : WHITE) : faint(page_col[p]));
     // TEMPO: flashes on the beat; white while its overlay is open
     led(TEMPO_X, 15, tempo_overlay ? WHITE : beat_on(now) ? LED_RGB(31, 31, 31) : LED_RGB(6, 2, 2));
     led(12, 15, hist_undo ? LED_RGB(10, 10, 10) : LED_RGB(1, 1, 1));
@@ -1914,18 +2592,111 @@ struct clatter12 : panel_t {
   }
 
   // ================================================================== saving and loading
-  void capture_project() {
+  // A save is one base64 field, "clatter12", of a version-3 project (project3_t and its slots),
+  // put together in PSRAM (C12_PSRAM_IO_OFFSET: it may take 30 KB, which the 128 KB arena is better
+  // without). A load reads it there, checks it whole, and only then decodes it into this object
+  // (on a load, the staged copy Plinky makes): the settings into proj, the patterns into bank.
+  // Versions 1 and 2 (one pattern) become slot 1 of an otherwise empty bank.
+  static uint8_t *io_memory() {
     using namespace c12glue;
-    project_t &p = proj;
+    if (get_psram_size() < (uint32_t)(C12_PSRAM_IO_OFFSET + C12_PSRAM_IO_BYTES)) return nullptr;
+    return (uint8_t *)get_psram_ptr() + C12_PSRAM_IO_OFFSET;
+  }
+  // every field of a step in range, or the step goes
+  static uint32_t cell_checked(int t, uint32_t c) {
+    unsigned v = c12::c12x_cell_velocity(c), var = c12::c12x_cell_variation(c), cond = c12::c12x_cell_condition(c);
+    bool ok = v <= 127 && (int)var <= c12::c12x_variation_last(t) && (int)cond < c12::c12x_conditions &&
+              (int)c12::c12x_cell_ratchet(c) < c12::c12x_ratchets && (int)c12::c12x_cell_curve(c) < c12::c12x_curves &&
+              (int)c12::c12x_cell_roll(c) < c12::c12x_rolls && !(c >> 29);
+    unsigned tone = (c >> 8) & 0xff;
+    ok = ok && (tone == 0 || tone >= 128);
+    return ok ? c : 0u;
+  }
+  static bool slot_is_default(const c12glue::slot_t &b) {
+    return !has_steps(b.pat) && b.pat.last_page == 0 && b.swing == 50 && b.style == 0 && b.density == 50 && b.complexity == 50;
+  }
+  // a slot as bytes: its head, then its steps, sparse (index, cell: 6 bytes each) when that is
+  // smaller, else all 448 cells. 0 bytes for an empty slot at its defaults.
+  static int slot_encode(const c12glue::slot_t &b, uint8_t *out) {
+    using namespace c12glue;
+    if (slot_is_default(b)) return 0;
+    int count = 0;
+    for (int t = 0; t < TRACKS; t++)
+      for (int st = 0; st < 64; st++) count += b.pat.cell[t][st] != 0;
+    const bool sparse = count * 6 < 7 * 64 * 4;
+    out[0] = b.pat.last_page & 3u;
+    out[1] = b.swing;
+    out[2] = b.style;
+    out[3] = b.density;
+    out[4] = b.complexity;
+    out[5] = sparse ? 1 : 0;
+    out[6] = (uint8_t)count;
+    out[7] = (uint8_t)(count >> 8);
+    for (int k = 0; k < 4; k++) out[8 + k] = (uint8_t)(b.gen_seed >> (8 * k));
+    int n = SLOT_HEAD;
+    for (int t = 0; t < TRACKS; t++)
+      for (int st = 0; st < 64; st++) {
+        const uint32_t c = b.pat.cell[t][st];
+        if (sparse && !c) continue;
+        if (sparse) {
+          const int idx = t * 64 + st;
+          out[n++] = (uint8_t)idx;
+          out[n++] = (uint8_t)(idx >> 8);
+        }
+        for (int k = 0; k < 4; k++) out[n++] = (uint8_t)(c >> (8 * k));
+      }
+    return n;
+  }
+  // bytes back into a slot; false (and b untouched) if they are not a slot's
+  static bool slot_decode(const uint8_t *in, int n, c12glue::slot_t &b, bool write) {
+    using namespace c12glue;
+    if (n < SLOT_HEAD || in[0] > 3 || in[5] > 1) return false;
+    const int count = in[6] | in[7] << 8;
+    const bool sparse = in[5] == 1;
+    if (n != SLOT_HEAD + (sparse ? count * 6 : 7 * 64 * 4) || count > 7 * 64) return false;
+    if (sparse)
+      for (int k = 0; k < count; k++)
+        if ((in[SLOT_HEAD + 6 * k] | in[SLOT_HEAD + 6 * k + 1] << 8) >= 7 * 64) return false;
+    if (!write) return true;
+    slot_defaults(b);
+    b.pat.last_page = in[0];
+    b.swing = (uint8_t)clampi(in[1], 50, 75);
+    b.style = (uint8_t)(in[2] % c12::c12x_gen_styles);
+    b.density = (uint8_t)clampi(in[3], 0, 100);
+    b.complexity = (uint8_t)clampi(in[4], 0, 100);
+    b.gen_seed = (uint32_t)in[8] | (uint32_t)in[9] << 8 | (uint32_t)in[10] << 16 | (uint32_t)in[11] << 24;
+    const uint8_t *q = in + SLOT_HEAD;
+    if (sparse)
+      for (int k = 0; k < count; k++, q += 6) {
+        const int idx = q[0] | q[1] << 8, t = idx / 64;
+        const uint32_t c = (uint32_t)q[2] | (uint32_t)q[3] << 8 | (uint32_t)q[4] << 16 | (uint32_t)q[5] << 24;
+        b.pat.cell[t][idx % 64] = cell_checked(t, c);
+      }
+    else
+      for (int t = 0; t < TRACKS; t++)
+        for (int st = 0; st < 64; st++, q += 4)
+          b.pat.cell[t][st] = cell_checked(t, (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24);
+    return true;
+  }
+  static uint32_t project_crc(const uint8_t *io, uint32_t total) {
+    using namespace c12glue;
+    const uint32_t head = (uint32_t)__builtin_offsetof(project3_t, crc);
+    uint32_t c = c12::pocket_crc32(0, io, head);
+    if (total > sizeof(project3_t)) c = c12::pocket_crc32(c, io + sizeof(project3_t), total - (uint32_t)sizeof(project3_t));
+    return c;
+  }
+  // the project, as version 3, into `io`; returns its size
+  int capture_project(uint8_t *io) {
+    using namespace c12glue;
+    flush();
+    project3_t &p = *(project3_t *)io;
     memset(&p, 0, sizeof(p));
     p.magic = PROJECT_MAGIC;
     p.version = PROJECT_VERSION;
-    p.bytes = (uint16_t)sizeof(p);
-    const c12::pocket_pattern *pat = c12::pocket_seq_pattern();
-    memcpy(p.cell, pat->cell, sizeof(p.cell));
-    p.last_page = pat->last_page;
-    p.swing = (uint8_t)c12::pocket_seq_swing();
+    p.header_bytes = (uint16_t)sizeof(p);
     p.bpm = (uint16_t)clampi((int)(get_tempo_bpm() + 0.5f), c12::c12x_bpm_min, c12::c12x_bpm_max);
+    p.mut_strength = mut_strength;
+    p.track_locks = track_locks;
     memcpy(p.kit, kit, sizeof(p.kit));
     memcpy(p.level, level, sizeof(p.level));
     memcpy(p.delay, dsend, sizeof(p.delay));
@@ -1934,17 +2705,11 @@ struct clatter12 : panel_t {
     p.solo = solo;
     p.route = route;
     p.master = master;
-    for (int f = 0; f < c12::c12x_fx_params && f < 32; ++f) p.fx[f] = (uint8_t)c12::c12_fx_get(f);
-    p.style = style;
-    p.density = density;
-    p.complexity = complexity;
-    p.mut_strength = mut_strength;
-    p.track_locks = track_locks;
     p.sound_locks = sound_locks;
     p.kit_character = kit_character;
     p.wildness = wildness;
     p.kit_amount = kit_amount;
-    p.gen_seed = gen_seed;
+    for (int f = 0; f < c12::c12x_fx_params && f < 32; ++f) p.fx[f] = (uint8_t)c12::c12_fx_get(f);
     p.kit_seed = kit_seed;
     p.rep_div = rep_div;
     p.rep_mode = rep_mode;
@@ -1954,19 +2719,111 @@ struct clatter12 : panel_t {
     p.scene_quant = scene_quant;
     p.roll_target = roll_target;
     memcpy(p.scenes, scenes, sizeof(p.scenes));
-    p.crc = c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc));
+    p.cur = cur;
+    p.prev = prev_slot;
+    p.quant = quant;
+    p.vary_strength = vary_strength;
+    p.chain_len = chain_len;
+    p.chain_loop = chain_loop;
+    p.chain_sel = chain_sel;
+    memcpy(p.chain_slot, chain_slot, sizeof(p.chain_slot));
+    memcpy(p.chain_rep, chain_rep, sizeof(p.chain_rep));
+    uint32_t n = sizeof(p);
+    for (int i = 0; i < SLOTS; i++) {
+      const int b = slot_encode(bank[i], io + n);
+      p.slot_bytes[i] = (uint16_t)b;
+      n += (uint32_t)b;
+    }
+    p.total_bytes = n;
+    p.crc = project_crc(io, n);
+    return (int)n;
   }
-  // A version-1 project (proj_v1, checked) as version 2 in proj: steps converted to the new
-  // articulation bits, FX values carried (the SPACE ones take their defaults), no scenes.
-  bool convert_v1() {
+  // a version-3 project in io, checked whole; decoded into proj and bank only if it all holds
+  bool decode_v3(const uint8_t *io, int bytes) {
     using namespace c12glue;
-    const project_v1_t &o = proj_v1;
-    if (o.magic != PROJECT_MAGIC || o.version != 1 || o.bytes != sizeof(project_v1_t)) return false;
-    if (o.crc != c12::pocket_crc32(0, &o, (unsigned)__builtin_offsetof(project_v1_t, crc))) return false;
-    project_t &p = proj;
+    if (bytes < (int)sizeof(project3_t)) return false;
+    const project3_t &p = *(const project3_t *)io;
+    if (p.magic != PROJECT_MAGIC || p.version != 3 || p.header_bytes != sizeof(project3_t) || p.total_bytes != (uint32_t)bytes) return false;
+    if (p.crc != project_crc(io, p.total_bytes)) return false;
+    uint32_t n = sizeof(project3_t);
+    for (int i = 0; i < SLOTS; i++) {
+      if (p.slot_bytes[i] && !slot_decode(io + n, p.slot_bytes[i], bank[i], false)) return false;
+      n += p.slot_bytes[i];
+    }
+    if (n != p.total_bytes) return false;
+    n = sizeof(project3_t);
+    for (int i = 0; i < SLOTS; i++) {
+      if (p.slot_bytes[i]) slot_decode(io + n, p.slot_bytes[i], bank[i], true);
+      else slot_defaults(bank[i]);
+      n += p.slot_bytes[i];
+    }
+    proj = p;
+    return true;
+  }
+  // a version-2 project as version 3: its pattern in slot 1, the other slots empty
+  void from_v2(const c12glue::project_t &o) {
+    using namespace c12glue;
+    project3_t &p = proj;
     memset(&p, 0, sizeof(p));
     p.magic = PROJECT_MAGIC;
     p.version = PROJECT_VERSION;
+    p.header_bytes = (uint16_t)sizeof(p);
+    p.bpm = o.bpm;
+    p.mut_strength = o.mut_strength;
+    p.track_locks = o.track_locks;
+    memcpy(p.kit, o.kit, sizeof(p.kit));
+    memcpy(p.level, o.level, sizeof(p.level));
+    memcpy(p.delay, o.delay, sizeof(p.delay));
+    memcpy(p.reverb, o.reverb, sizeof(p.reverb));
+    p.mute = o.mute;
+    p.solo = o.solo;
+    p.route = o.route;
+    p.master = o.master;
+    p.sound_locks = o.sound_locks;
+    p.kit_character = o.kit_character;
+    p.wildness = o.wildness;
+    p.kit_amount = o.kit_amount;
+    memcpy(p.fx, o.fx, sizeof(p.fx));
+    p.kit_seed = o.kit_seed;
+    p.rep_div = o.rep_div;
+    p.rep_mode = o.rep_mode;
+    p.rep_curve = o.rep_curve;
+    p.br_shape = o.br_shape;
+    p.br_mask = o.br_mask;
+    p.scene_quant = o.scene_quant;
+    p.roll_target = o.roll_target;
+    memcpy(p.scenes, o.scenes, sizeof(p.scenes));
+    p.cur = 0;
+    p.prev = 0xff;
+    p.quant = c12::C12_SWITCH_BAR;
+    p.vary_strength = 1;
+    p.chain_loop = 1;
+    memset(p.chain_rep, 1, sizeof(p.chain_rep));
+    for (int i = 0; i < SLOTS; i++) slot_defaults(bank[i]);
+    slot_t &b = bank[0];
+    for (int t = 0; t < TRACKS; t++)
+      for (int st = 0; st < 64; st++) b.pat.cell[t][st] = cell_checked(t, o.cell[t][st]);
+    b.pat.last_page = o.last_page & 3u;
+    b.swing = (uint8_t)clampi(o.swing, 50, 75);
+    b.style = (uint8_t)(o.style % c12::c12x_gen_styles);
+    b.density = (uint8_t)clampi(o.density, 0, 100);
+    b.complexity = (uint8_t)clampi(o.complexity, 0, 100);
+    b.gen_seed = o.gen_seed;
+  }
+  static bool v2_valid(const c12glue::project_t &p) {
+    using namespace c12glue;
+    if (p.magic != PROJECT_MAGIC || p.version != 2 || p.bytes != sizeof(project_t)) return false;
+    return p.crc == c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc));
+  }
+  // A version-1 project (checked) as version 2 in `p`: steps converted to the articulation bits,
+  // FX values carried (the SPACE ones take their defaults), no scenes.
+  static bool convert_v1(const c12glue::project_v1_t &o, c12glue::project_t &p) {
+    using namespace c12glue;
+    if (o.magic != PROJECT_MAGIC || o.version != 1 || o.bytes != sizeof(project_v1_t)) return false;
+    if (o.crc != c12::pocket_crc32(0, &o, (unsigned)__builtin_offsetof(project_v1_t, crc))) return false;
+    memset(&p, 0, sizeof(p));
+    p.magic = PROJECT_MAGIC;
+    p.version = 2;
     p.bytes = (uint16_t)sizeof(p);
     for (int t = 0; t < TRACKS; t++)
       for (int st = 0; st < 64; st++) p.cell[t][st] = o.cell[t][st] >> 27 ? 0u : c12::c12_cell_from_v1(o.cell[t][st]);
@@ -2002,32 +2859,25 @@ struct clatter12 : panel_t {
     p.crc = c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc));
     return true;
   }
-  // Checks everything before anything reaches the engine; a project that fails changes nothing.
-  bool project_valid(const c12glue::project_t &p) const {
+  // whatever version io holds, into proj and bank; false leaves both as they were
+  bool decode_any(const uint8_t *io, int bytes) {
     using namespace c12glue;
-    if (p.magic != PROJECT_MAGIC || p.version != PROJECT_VERSION || p.bytes != sizeof(project_t)) return false;
-    if (p.crc != c12::pocket_crc32(0, &p, (unsigned)__builtin_offsetof(project_t, crc))) return false;
-    return true;
+    if (bytes == (int)sizeof(project_v1_t)) {
+      project_t *v2 = (project_t *)(void *)(io + 48 * 1024); // room in the same PSRAM area
+      if (!convert_v1(*(const project_v1_t *)io, *v2)) return false;
+      from_v2(*v2);
+      return true;
+    }
+    if (bytes == (int)sizeof(project_t) && v2_valid(*(const project_t *)io)) {
+      from_v2(*(const project_t *)io);
+      return true;
+    }
+    return decode_v3(io, bytes);
   }
+  // in on_ui, after a load: proj's settings and bank's slot `cur` reach the engine
   void apply_project() {
     using namespace c12glue;
-    project_t &p = proj;
-    c12::pocket_pattern *pat = c12::pocket_seq_edit_begin();
-    for (int t = 0; t < TRACKS; ++t)
-      for (int s = 0; s < 64; ++s) {
-        uint32_t c = p.cell[t][s];
-        // every field in range, or the step goes
-        unsigned v = c12::c12x_cell_velocity(c), var = c12::c12x_cell_variation(c), cond = c12::c12x_cell_condition(c);
-        bool ok = v <= 127 && (int)var <= c12::c12x_variation_last(t) && (int)cond < c12::c12x_conditions &&
-                  (int)c12::c12x_cell_ratchet(c) < c12::c12x_ratchets && (int)c12::c12x_cell_curve(c) < c12::c12x_curves &&
-                  (int)c12::c12x_cell_roll(c) < c12::c12x_rolls && !(c >> 29);
-        unsigned tone = (c >> 8) & 0xff;
-        ok = ok && (tone == 0 || tone >= 128);
-        pat->cell[t][s] = ok ? c : 0;
-      }
-    pat->last_page = p.last_page & 3u;
-    c12::pocket_seq_edit_commit();
-    c12::pocket_seq_set_swing(p.swing);
+    const project3_t &p = proj;
     set_tempo_bpm((float)clampi(p.bpm, c12::c12x_bpm_min, c12::c12x_bpm_max), true);
     for (int i = 1; i < c12::c12x_sound_params && i < (int)sizeof(p.kit); ++i) kit[i] = (uint8_t)(p.kit[i] & 0x7f);
     for (int v = 0; v < VOICES; ++v) {
@@ -2048,16 +2898,12 @@ struct clatter12 : panel_t {
     master = p.master & 0x7f;
     apply_mixer();
     for (int f = 0; f < c12::c12x_fx_params && f < 32; ++f) c12::c12_fx_set(f, p.fx[f]); // c12_fx_set clamps
-    style = (uint8_t)(p.style % c12::c12x_gen_styles);
-    density = (uint8_t)clampi(p.density, 0, 100);
-    complexity = (uint8_t)clampi(p.complexity, 0, 100);
     mut_strength = (uint8_t)(p.mut_strength % c12::c12x_mutate_strengths);
     track_locks = p.track_locks & 0x7f;
     sound_locks = p.sound_locks & 0x3f;
     kit_character = (uint8_t)(p.kit_character % c12::c12x_kit_characters);
     wildness = (uint8_t)clampi(p.wildness, 0, 100);
     kit_amount = (uint8_t)clampi(p.kit_amount, 0, 100);
-    gen_seed = p.gen_seed;
     kit_seed = p.kit_seed;
     rep_div = p.rep_div && p.rep_div < c12::c12x_divs ? p.rep_div : (uint8_t)c12::c12x_div_16;
     rep_mode = (uint8_t)(p.rep_mode & 3);
@@ -2082,32 +2928,55 @@ struct clatter12 : panel_t {
     }
     scene_active = 0xff;
     scene_pending = -1;
+    // the patterns: the bank is in place (decoded); the slot that was playing goes to the engine
+    quant = p.quant >= c12::C12_SWITCH_NOW && p.quant <= c12::C12_SWITCH_END ? p.quant : (uint8_t)c12::C12_SWITCH_BAR;
+    vary_strength = (uint8_t)(p.vary_strength % 3);
+    chain_len = (uint8_t)(p.chain_len <= CHAIN_MAX ? p.chain_len : 0);
+    chain_loop = p.chain_loop ? 1 : 0;
+    chain_sel = (uint8_t)(p.chain_sel < chain_len ? p.chain_sel : 0);
+    for (int e = 0; e < CHAIN_MAX; e++) {
+      chain_slot[e] = (uint8_t)(p.chain_slot[e] % SLOTS);
+      chain_rep[e] = (uint8_t)clampi(p.chain_rep[e], 1, 16);
+    }
+    chain_on = false;
+    const int c = p.cur % SLOTS;
+    c12::c12_seq_cancel();
+    seq_lock();
+    c12::pocket_pattern *pt = c12::pocket_seq_edit_begin();
+    *pt = bank[c].pat;
+    c12::pocket_seq_edit_commit();
+    c12::pocket_seq_set_swing(bank[c].swing);
+    c12::c12_seq_set_live_slot((unsigned)c);
+    seq_unlock();
+    cur = (uint8_t)c;
+    prev_slot = p.prev < SLOTS ? p.prev : 0xff;
+    slot_meta_load(c);
+    sw_seen = c12::c12_seq_switches();
+    chain_reset();
+    filled_dirty = true;
     release_all_perf();
     sel_track = sel_step = -1;
   }
 
   // Plinky's save/load page calls this (JSON, with the project as one base64 field). On a load it
   // runs on a freshly constructed staged copy of the panel, which then replaces this one: the
-  // project is only checked and applied in on_ui, never written to the engine from here.
+  // project is checked and decoded here into the staged object, and reaches the engine in on_ui.
   bool on_serialise(serialiser_t &s, int version) override {
+    using namespace c12glue;
     (void)version;
-    if (s.reading) {
-      memset(&proj, 0, sizeof(proj)); // a field a file lacks must not keep an older value
-    } else if (g_ready_now()) {
-      capture_project();
+    uint8_t *io = io_memory();
+    if (!io) {
+      printf("clatter12: no PSRAM for saving and loading\n");
+      return true;
     }
-    int bytes = (int)sizeof(proj);
+    int bytes = 0;
+    if (s.reading) memset(io, 0, (size_t)C12_PSRAM_IO_BYTES); // a field a file lacks must not keep older bytes
+    else if (g_ready_now()) bytes = capture_project(io);
     OBJECT_BEGIN(s);
-    FIELD_BASE64("clatter12", &proj, bytes, (int)sizeof(proj));
+    FIELD_BASE64("clatter12", io, bytes, C12_PSRAM_IO_BYTES);
     OBJECT_END(s);
     if (s.reading) {
-      if (bytes == (int)sizeof(c12glue::project_v1_t)) {
-        // CLATTER 12 0.0.2's projects: version 1, converted
-        memcpy(&proj_v1, &proj, sizeof(proj_v1));
-        load_pending = convert_v1();
-      } else {
-        load_pending = bytes == (int)sizeof(proj) && project_valid(proj);
-      }
+      load_pending = decode_any(io, bytes);
       if (load_pending) want_default = false;
       else printf("clatter12: the saved project is not one this version reads (%d bytes); not loaded\n", bytes);
     }
@@ -2330,7 +3199,7 @@ struct clatter12 : panel_t {
     if (load_pending) {
       // a staged load replaced this object: its project is checked, now it reaches the engine
       load_pending = false;
-      if (project_valid(proj)) apply_project();
+      if (proj.magic == PROJECT_MAGIC && proj.version == PROJECT_VERSION) apply_project();
       want_default = false;
       hist_at = hist_undo = hist_redo = 0;
     }
@@ -2347,8 +3216,15 @@ struct clatter12 : panel_t {
       c12::pocket_lxr_set_bpm(bpm);
       last_bpm = bpm;
     }
+    // the pattern bank: a switch the engine made is taken in first, before anything edits
+    bank_sync();
+    chain_stop_check();
     bool want_play = is_transport_playing();
-    if (want_play != (c12::pocket_seq_playing() != 0)) c12::pocket_seq_play(want_play ? 1 : 0);
+    if (want_play != (c12::pocket_seq_playing() != 0)) {
+      if (want_play) chain_on_play(); // PLAY with the chain on: from its first entry
+      c12::pocket_seq_play(want_play ? 1 : 0);
+    }
+    chain_update();
     uint32_t now = time_us();
     update_meters();
     log_line(now);
@@ -2379,12 +3255,14 @@ struct clatter12 : panel_t {
       return;
     }
     // touches of a page that is no longer shown are finished
-    if (page != PAGE_SEQ)
+    if (page != PAGE_SEQ || pat_overlay)
       for (int t = 0; t < TRACKS; t++)
         for (int x = 0; x < STEPS; ++x) press[t][x].active = 0;
     tempo_pad(now);
     if (tempo_overlay) {
       tempo_overlay_touch(now);
+    } else if (pat_overlay) {
+      pattern_overlay_touch(now);
     } else {
       switch (page) {
       case PAGE_SEQ:
@@ -2401,7 +3279,7 @@ struct clatter12 : panel_t {
       case PAGE_REPEAT: repeat_page(now, false); break;
       }
     }
-    if (page != PAGE_REPEAT || tempo_overlay) repeat_background();
+    if (page != PAGE_REPEAT || tempo_overlay || pat_overlay) repeat_background();
     perf_apply();
     scene_service();
     nav_and_transport(page);
@@ -2409,6 +3287,8 @@ struct clatter12 : panel_t {
     leds_clear();
     if (tempo_overlay) {
       draw_tempo_overlay(now);
+    } else if (pat_overlay) {
+      draw_pattern_overlay(now);
     } else {
       switch (page) {
       case PAGE_SEQ: draw_seq(now); break;

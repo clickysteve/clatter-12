@@ -163,17 +163,19 @@ needs beyond a few hundred bytes lives in the panel object (Plinky's 128 KB aren
 
 | | Size (GCC 13 `-O3`, Cortex-M33, engine and panel, gc-linked: `make m33`) | Where |
 |---|---|---|
-| code | 144 KB at `-O3` (108 KB at `-O2`, 73 KB at `-Os`; `clatter_12_sram.cpp`: 15 KB of it in SRAM) | flash / `.time_critical` SRAM |
+| code | 171 KB at `-O3` (130 KB at `-O2`, 81 KB at `-Os`; `clatter_12_sram.cpp`: 15 KB of it in SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
 | LXR tables, unpacked | 100 KB | PSRAM, from its start (`C12_TABLES_IN_PSRAM 1`, the default) |
 | static state left in static SRAM (sequencer and performance counters, profile, diagnostics) | 1.7 KB | static SRAM |
-| the engine's working memory (LXR voices and parameters, event ring, patterns, converter 12 KB, mix and send buffers, strokes, trigger log) | 39 KB | the panel object (`engine_ram`, `c12_engine_ram_bind`) |
+| the pattern bank: 16 slots (steps, length, swing, generator settings), and a working slot | 30.7 KB | the panel object (`bank`, `work`) |
+| the engine's working memory (LXR voices and parameters, event ring, the two pattern buffers and the queued one, converter 12 KB, mix and send buffers, strokes, trigger log) | 41 KB | the panel object (`engine_ram`, `c12_engine_ram_bind`) |
 | delay lines | 256 KB | PSRAM, 128 KB in (bound at run time; none: silent) |
-| undo history (16 snapshots) | 33 KB | PSRAM, 384 KB in (none: no undo) |
+| undo history (16 snapshots, each with its pattern slot) | 33 KB | PSRAM, 384 KB in (none: no undo) |
+| a save or a load, as bytes (project version 3) | up to 30 KB of 64 KB | PSRAM, 448 KB in |
 | reverb lines | 26 KB | the panel object (the last member, kept out of a staged load's copy, so a load leaves them silent) |
-| panel object (UI state, the kit, the project, two alternative patterns, scenes, the engine's memory, the reverb's lines) | 75.2 KB | Plinky's 128 KB panel arena (a `static_assert` stops a build that does not fit) |
-| stack | deepest chain 760 B from `on_dsp` (core 1), 664 B from `on_ui` (core 0), GCC's call graph | the cores' stacks |
-| source file | 473 KB (`--compact`: engine compacted, glue without comments) | the IDE |
+| panel object (UI state, the kit, the pattern bank, a loaded project's settings, two alternative patterns, scenes, the engine's memory, the reverb's lines) | 103.2 KB | Plinky's 128 KB panel arena (a `static_assert` stops a build that does not fit) |
+| stack | deepest chain 768 B from `on_dsp` (core 1), 656 B from `on_ui` (core 0), GCC's call graph | the cores' stacks |
+| source file | 477 KB (`--compact`: engine compacted, its packed tables as string literals, glue without comments; the same program, `test_panel_sim_compact`) | the IDE |
 
 **How the engine's memory moved** (`tools/amalgamate.py`, `RELOCATE`). The LXR's, Pocket's and CLATTER
 12's zero-initialised file-scope objects are listed by name. For each, a macro defined before its first
@@ -193,6 +195,22 @@ changing it while the copy is taken, or the copy written back would be torn: `on
 holds the engine (core 1 renders one block faded out, then outputs silence and touches nothing),
 copies, and the hold ends when the load is applied, when Plinky calls `on_load_finished`, or after
 10 s. What is written back is then exactly the held engine. The first block after fades in.
+
+**Pattern switching** (`c12_seq_queue`, `core/c12_engine.c` `seq_switch`). The control context
+copies the pattern to be switched in into the engine's queued buffer, with its slot number, swing and
+a mode (NOW, BAR, END, STOP). In each LXR block, before Pocket's sequencer runs, the engine works out
+from Pocket's own phase arithmetic whether this block's step is the boundary asked for; if it is, the
+queued pattern goes into Pocket's spare pattern buffer, Pocket's step index is set so that its own
+advance lands on the right step (the new pattern's first, or the same position for NOW), and the
+buffers flip. Then Pocket fires the step from the new pattern: the clock, the swing pairs and the
+tempo are untouched. Flam and drag graces played ahead of a step look into the queued pattern when the
+next step is a switch. The control context writes patterns only under a two-flag lock
+(`c12_seq_lock`): the audio context, meeting it held at a boundary, waits for it (a few microseconds
+at most, bounded; `c12_seq_late` counts any it could not wait for: 0 in every test). The pattern the
+switch replaced stays in Pocket's spare buffer, with every edit made to it, until the panel takes it
+back into its slot (`bank_sync`, before any other pattern write). Chains are counted on core 0 from the
+engine's count of pattern starts, and each entry's successor is queued for the pattern's END during
+its last pass, so the engine makes every chain step on the step itself.
 
 No allocation anywhere. The LXR FX's own stack buffers are kept to 128 bytes by running them 32
 frames at a time.

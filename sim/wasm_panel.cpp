@@ -23,7 +23,7 @@ static clatter12 *P;
 static mix_buffers_t mb;
 static int16_t pcm[BLOCK_SIZE * 2 * 2];
 static uint32_t leds[256];
-static char text[16384];
+static char text[65536]; // a save of a full pattern bank is up to about 40 KB of base64
 static c12_help_t help;
 // A click can press and release between two UI frames, which no finger does: a press is held until
 // a frame has seen it, and a release that comes sooner waits for that frame.
@@ -140,6 +140,12 @@ EXPORT("c12p_status") int c12p_status(int what) {
   case 10: return P->tempo_overlay;
   case 11: return P->latch ? 1 : 0;
   case 12: return P->plinky_fx() ? 1 : 0;
+  case 13: return P->pat_overlay ? 1 : 0;
+  case 14: return P->cur;              // the pattern slot playing
+  case 15: return P->queued_slot();    // the slot queued, or -1
+  case 16: return P->filled_mask();    // slots with steps, a bit each
+  case 17: return P->chain_on ? 1 : 0;
+  case 18: return P->chain_len;
   default: return 0;
   }
 }

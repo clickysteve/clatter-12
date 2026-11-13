@@ -73,7 +73,7 @@ class C12Panel extends AudioWorkletProcessor {
     const x = this.x;
     const leds = new Uint32Array(x.memory.buffer, x.c12p_leds(), 256).slice();
     const status = [];
-    for (let i = 0; i < 13; i++) status.push(x.c12p_status(i));
+    for (let i = 0; i < 19; i++) status.push(x.c12p_status(i));
     this.port.postMessage({ t: 'state', leds, page: x.c12p_page(), playing: x.c12p_playing(), tempo: x.c12p_tempo(), status, peak: this.peak / 32768 }, [leds.buffer]);
     this.peak = 0;
   }

@@ -60,6 +60,15 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
   - [x] Project loads hold the engine while Plinky copies the object (fade, silence, fade).
   - [x] Diagnostics: seven settings pages (load, peak, overruns, late callbacks, spreading, voices and
         effects, memory), resettable; an opt-in cycle-counter build.
+  - [x] Plinky's save picker drawn on the SAVE page's own rows (it was on page 1's).
+- 0.0.6-exp, pattern banks and song structure (docs/DESIGN.md "Patterns"):
+  - [x] Sixteen slots (steps, length, swing, generator settings each), one kit and mixer.
+  - [x] Switching made in the engine on the step: NOW, next BAR, pattern END, STOP; queued, cancelled,
+        shown blinking; no drift, voices and effect tails untouched, rolls and flams across it.
+  - [x] PATTERN overlay (tap the lit page pad): copy, DUP, VARY (three strengths), NEW, BACK, CLEAR
+        (two hands), all undoable; PERFORM's row 11 for switching while playing.
+  - [x] Chain: 16 entries with repeats, LOOP or ONCE, jump, manual override.
+  - [x] Project version 3 (sparse slots, built in PSRAM); versions 1 and 2 load into slot 1.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 
@@ -118,7 +127,7 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
 
 - [ ] MORPH between two kits (evaluated in docs/DESIGN.md; deferred until a device shows headroom):
       continuous parameters only, rate-limited through the kit pump, per-track enable, pressure.
-- [ ] Pattern and kit banks, so that scenes can change them.
+- [ ] Kit banks, and scenes that change kits and patterns. Parameter locks per step. Per-track lengths.
 - [ ] Sub-block timing for strokes and repeats (now the LXR block, 1.45 ms, as Pocket's steps).
 - [ ] Fine tempo below 1 BPM (Pocket's sequencer keeps whole BPM).
 

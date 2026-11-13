@@ -5,7 +5,12 @@
 // (PPM) and the session's audio (WAV). SIMULATION ONLY: proves CLATTER 12's own logic, not Plinky's.
 // Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only
 #include "plinky_sim.h"
+// the panel as generated: the readable file, or (C12_PANEL_COMPACT) the compact one pasted into the IDE
+#ifdef C12_PANEL_COMPACT
+#include "clatter_12.cpp"
+#else
 #include "clatter_12_full.cpp"
+#endif
 #include "check.h"
 #include <new>
 #include <vector>
@@ -107,7 +112,7 @@ static void only_kick(int every = 4) {
 
 // a save as Plinky makes one, and a load as Plinky does it: a staged, freshly constructed copy
 // of the panel reads the file, then replaces the live object (memcpy), then on_load_finished
-static char save_text[16384];
+static char save_text[65536];
 static int save_len;
 static void save() {
   serialiser_t s(false, save_text, sizeof save_text);
@@ -119,7 +124,7 @@ static void load(const char *text, int len) {
   memset(staged_mem, 0, sizeof staged_mem);
   clatter12 *st = new (staged_mem) clatter12();
   P->on_prepare_staged_load(st, sizeof staged_mem);
-  static char copy[16384];
+  static char copy[65536];
   memcpy(copy, text, (size_t)len);
   copy[len] = 0;
   serialiser_t s(true, copy, sizeof copy, len);
@@ -610,7 +615,7 @@ int main() {
   uint8_t saved_kit[256];
   memcpy(saved_kit, P->kit, sizeof saved_kit);
   save();
-  CHECK(save_len > 2000 && strstr(save_text, "\"clatter12\":\""), "a save is one base64 field (%d bytes)", save_len);
+  CHECK(save_len > 400 && strstr(save_text, "\"clatter12\":\""), "a save is one base64 field (%d bytes; sparse slots)", save_len);
   // change everything, then load
   tap(9, 15); // GEN
   go(GEN);
@@ -641,7 +646,7 @@ int main() {
   c12::pocket_pattern before_bad = *pat();
   uint8_t kit_before_bad[256];
   memcpy(kit_before_bad, P->kit, 256);
-  char bad[16384];
+  static char bad[65536];
   memcpy(bad, save_text, (size_t)save_len + 1);
   char *b64 = strstr(bad, "\":\"") + 3;
   b64[40] = b64[40] == 'A' ? 'B' : 'A'; // one bit of the pattern
@@ -656,16 +661,16 @@ int main() {
   CHECK(memcmp(pat(), &before_bad, sizeof before_bad) == 0, "a truncated save is refused");
   // a save at another version is refused (versioned data structure)
   {
-    c12glue::project_t pj = P->proj;
-    P->capture_project();
-    pj = P->proj;
-    pj.version = 99;
-    pj.crc = c12::pocket_crc32(0, &pj, (unsigned)__builtin_offsetof(c12glue::project_t, crc));
-    char t[16384];
+    uint8_t *io = P->io_memory();
+    const int n = P->capture_project(io);
+    c12glue::project3_t &h = *(c12glue::project3_t *)io;
+    h.version = 99;
+    h.crc = P->project_crc(io, (uint32_t)n);
+    static char t[65536];
     serialiser_t w(false, t, sizeof t);
-    int bytes = (int)sizeof pj;
+    int bytes = n;
     w.begin();
-    w.field_base64("clatter12", &pj, bytes, bytes);
+    w.field_base64("clatter12", io, bytes, bytes);
     w.end();
     load(t, w.len);
     CHECK(memcmp(pat(), &before_bad, sizeof before_bad) == 0, "a save of another version is refused");
@@ -1040,7 +1045,7 @@ int main() {
     for (int f = 0; f < 16; f++) o.fx[f] = (uint8_t)c12::c12_fx_get(f);
     o.density = 50; o.complexity = 50;
     o.crc = c12::pocket_crc32(0, &o, (unsigned)__builtin_offsetof(c12glue::project_v1_t, crc));
-    char t[16384];
+    static char t[65536];
     serialiser_t w(false, t, sizeof t);
     int bytes = (int)sizeof o;
     w.begin();
@@ -1058,6 +1063,309 @@ int main() {
     c12::pocket_pattern v2 = *pat();
     load(save_text, save_len);
     CHECK(memcmp(pat(), &v2, sizeof v2) == 0, "saved as version 2 and loaded: the same steps");
+  }
+
+  // ================================================================ the pattern bank
+  {
+    auto hold_tap = [](int hx, int hy, int tx, int ty) {
+      sim::touch(hx, hy, 120);
+      run_ms(20);
+      tap(tx, ty);
+      sim::release(hx, hy);
+      run_ms(12);
+    };
+    auto slot_pat = [](int i) -> c12::pocket_pattern {
+      P->flush();
+      return i == P->cur ? *pat() : P->bank[i].pat;
+    };
+    auto slot_is = [&](int i, const c12::pocket_pattern &r) {
+      const c12::pocket_pattern a = slot_pat(i);
+      return memcmp(&a, &r, sizeof r) == 0;
+    };
+    auto hits = [](const c12::pocket_pattern &p) {
+      int n = 0;
+      for (int t = 0; t < 7; t++)
+        for (int s = 0; s < 64; s++) n += c12::c12x_cell_velocity(p.cell[t][s]) != 0;
+      return n;
+    };
+    auto until_switch = [](int ms) {
+      const uint32_t sw = c12::c12_seq_switches();
+      for (int t = 0; t < ms && c12::c12_seq_switches() == sw; t += 4) run_ms(4);
+      run_ms(8);
+    };
+    if (is_transport_playing()) stop_transport();
+    run_ms(20);
+    go(SEQ);
+    tap(SEQ, 15); // the lit pad of the page shown
+    CHECK(P->pat_overlay, "tapping the lit page pad opens the PATTERN overlay");
+    CHECK(sim::led(P->cur, 0) == WHITE && sim::led(SEQ, 15) == LED_RGB(0, 31, 24), "the slot playing is white; the page pad in the overlay's colour");
+    // all sixteen slots, each its own pattern (stopped: a slot plays at once)
+    bool all = true;
+    for (int i = 0; i < 16; i++) {
+      tap(i, 0);
+      all = all && P->cur == i && c12::c12_seq_live_slot() == (unsigned)i;
+      c12::pocket_pattern *p = P->edit_begin();
+      memset(p->cell, 0, sizeof p->cell);
+      p->last_page = 0;
+      p->cell[i % 7][i] = c12::c12x_cell(40 + i * 5, 0);
+      p->cell[0][0] = c12::c12x_cell(100, 0);
+      P->edit_commit();
+    }
+    CHECK(all, "every slot of sixteen is picked by its pad, at once when stopped");
+    all = true;
+    for (int i = 0; i < 16; i++) {
+      tap(i, 0);
+      all = all && hits(*pat()) == (i ? 2 : 1) && vel(i % 7, i) == (unsigned)(i ? 40 + i * 5 : 100);
+    }
+    CHECK(all, "and each keeps its own steps when another plays");
+    run_ms(20);
+    uint16_t f = P->filled_mask();
+    CHECK(f == 0xffff && brightness(sim::led(3, 0)) > brightness(LED_RGB(2, 2, 2)), "populated slots light in their colour");
+    // copy: hold a slot, tap another; undo takes it back
+    const c12::pocket_pattern s9 = slot_pat(9);
+    const int cur0 = P->cur;
+    hold_tap(2, 0, 9, 0);
+    CHECK(P->cur == cur0 && memcmp(&P->bank[9].pat, &P->bank[2].pat, sizeof(c12::pocket_pattern)) == 0, "hold slot 3, tap slot 10: copied, and nothing else changes");
+    tap(12, 15); // UNDO
+    CHECK(memcmp(&P->bank[9].pat, &s9, sizeof s9) == 0, "UNDO restores the slot copied over");
+    // clear: CLEAR alone does nothing; held with a slot, it empties it (undoable)
+    c12::pocket_pattern before[16];
+    for (int i = 0; i < 16; i++) before[i] = slot_pat(i);
+    tap(13, 4);
+    all = true;
+    for (int i = 0; i < 16; i++) all = all && memcmp(&before[i], &P->bank[i].pat, sizeof before[i]) == 0;
+    CHECK(all, "CLEAR tapped alone clears nothing");
+    hold_tap(13, 4, 9, 0);
+    CHECK(hits(P->bank[9].pat) == 0 && !(P->filled_mask() >> 9 & 1) && sim::led(9, 0) == LED_RGB(2, 2, 2), "hold CLEAR, tap slot 10: it is empty, and shown empty");
+    tap(12, 15);
+    CHECK(hits(P->bank[9].pat) == 2, "UNDO brings it back");
+    hold_tap(13, 4, 9, 0);
+    hold_tap(13, 4, 12, 0);
+    hold_tap(13, 4, 13, 0);
+    hold_tap(13, 4, 14, 0);
+
+    // DUP while playing: the duplicate plays from the next step, the same steps, the original kept
+    tap(3, 0);
+    tap(15, 15); // PLAY
+    run_ms(300);
+    const c12::pocket_pattern orig = slot_pat(3);
+    tap(0, 4);
+    run_ms(300);
+    CHECK(P->cur == 9 && slot_is(9, orig) && memcmp(&P->bank[3].pat, &orig, sizeof orig) == 0,
+          "DUP: the next empty slot (10) gets the pattern and plays it; slot 4 is unchanged");
+    P->seq_cell(5, 3, c12::c12x_cell(90, 0)); // edit the duplicate
+    // a switch at the bar; an edit to the pattern playing while it waits is kept in its slot
+    tap(3, 0);
+    CHECK(P->queued_slot() == 3 && P->cur == 9, "playing: slot 4 is queued (QUANT: next bar)");
+    bool blinks = false;
+    uint32_t l0 = sim::led(3, 0);
+    for (int i = 0; i < 80 && !blinks; i++) { run_ms(4); blinks = sim::led(3, 0) != l0 && P->queued_slot() == 3; }
+    CHECK(blinks, "the queued slot blinks");
+    P->seq_cell(5, 7, c12::c12x_cell(70, 0));
+    until_switch(3000);
+    CHECK(P->cur == 3 && P->queued_slot() < 0 && c12::pocket_seq_position() < 8, "the switch is made at the bar, from slot 4's first step (position %d)", c12::pocket_seq_position());
+    CHECK(vel(5, 3) == 0 && c12::c12x_cell_velocity(P->bank[9].pat.cell[5][3]) == 90 && c12::c12x_cell_velocity(P->bank[9].pat.cell[5][7]) == 70,
+          "the duplicate kept both edits, the edit made while it waited too; the original has neither");
+    // cancel
+    tap(9, 0);
+    tap(9, 0);
+    CHECK(P->queued_slot() < 0, "tapping the queued slot again cancels it");
+    run_ms(2400);
+    CHECK(P->cur == 3, "and nothing switches");
+    // VARY: a variation into the next empty slot, queued; the original untouched; BACK returns
+    const c12::pocket_pattern src = slot_pat(3);
+    tap(3, 4);
+    CHECK(P->queued_slot() == 12 && hits(P->bank[12].pat) > 0 && memcmp(&P->bank[12].pat, &src, sizeof src) != 0 &&
+              slot_is(3, src),
+          "VARY: a variation in slot 13, queued, the original as it was");
+    until_switch(3000);
+    CHECK(P->cur == 12, "the variation plays");
+    tap(9, 4); // BACK
+    run_ms(200);
+    CHECK(P->cur == 3 && memcmp(pat(), &src, sizeof src) == 0, "BACK: the original again, at the next step");
+    // NEW: a generated pattern into the next empty slot (14)
+    tap(6, 4);
+    CHECK(P->queued_slot() == 13 && hits(P->bank[13].pat) > 0, "NEW: a generated pattern in slot 14, queued");
+    tap(13, 0); // cancel it
+    // VARY held, with a slot: into that slot, not played
+    hold_tap(3, 4, 14, 0);
+    CHECK(hits(P->bank[14].pat) > 0 && P->queued_slot() < 0, "hold VARY, tap slot 15: a variation there, nothing queued");
+
+    // the chain: slot 4 twice, 13, 14, looping
+    hold_tap(0, 6, 3, 0);
+    tap(0, 6); // select entry 1
+    tap(1, 7); // two repeats
+    hold_tap(1, 6, 12, 0);
+    hold_tap(2, 6, 13, 0);
+    CHECK(P->chain_len == 3 && P->chain_slot[0] == 3 && P->chain_rep[0] == 2 && P->chain_slot[1] == 12 && P->chain_slot[2] == 13,
+          "a chain built with hold-entry, tap-slot; repeats on row 8");
+    stop_transport();
+    run_ms(40);
+    tap(0, 8); // CHAIN on
+    int seq_[8], n = 0;
+    uint32_t starts = c12::c12_seq_starts();
+    sim::touch(15, 15, 120); // PLAY: its first pass is the chain's first
+    run_ms(8);
+    sim::release(15, 15);
+    for (int t = 0; t < 16000 && n < 8; t += 4) {
+      run_ms(4);
+      if (c12::c12_seq_starts() != starts) {
+        starts = c12::c12_seq_starts();
+        run_ms(4);
+        seq_[n++] = P->cur;
+      }
+    }
+    CHECK(n == 8 && seq_[0] == 3 && seq_[1] == 3 && seq_[2] == 12 && seq_[3] == 13 && seq_[4] == 3 && seq_[5] == 3 && seq_[6] == 12 && seq_[7] == 13,
+          "the chain plays 4 4 13 14 4 4 13 14... (%d %d %d %d %d %d %d %d)", seq_[0] + 1, seq_[1] + 1, seq_[2] + 1, seq_[3] + 1,
+          seq_[4] + 1, seq_[5] + 1, seq_[6] + 1, seq_[7] + 1);
+    CHECK(sim::led(P->ch_pos, 6) == WHITE || P->ch_next >= 0, "the entry playing is white");
+    // manual override: a slot picked pauses the chain
+    tap(9, 0);
+    CHECK(!P->chain_on && P->queued_slot() == 9, "a slot picked while the chain plays pauses the chain and is queued");
+    tap(9, 0);
+    // ONCE: from PLAY, through the chain, then the transport stops
+    tap(1, 8);
+    CHECK(!P->chain_loop, "LOOP off: ONCE");
+    stop_transport();
+    run_ms(40);
+    tap(0, 8);
+    tap(15, 15);
+    const uint32_t stops0 = c12::c12_seq_stops();
+    for (int t = 0; t < 12000 && is_transport_playing(); t += 4) run_ms(4);
+    CHECK(!is_transport_playing() && c12::c12_seq_stops() == stops0 + 1, "ONCE: the chain plays through and stops at its end");
+    tap(1, 8);
+    // jump: chain on and playing, tap an entry
+    tap(0, 8);
+    if (!P->chain_on) tap(0, 8);
+    tap(15, 15);
+    run_ms(500);
+    tap(2, 6);
+    CHECK(P->chain_on && P->queued_slot() == 13 && P->ch_next == 2, "tapping an entry while the chain plays jumps there, at the bar");
+    until_switch(3000);
+    CHECK(P->cur == 13, "and it plays");
+    tap(0, 8); // chain off
+
+    // PERFORM: row 12 is the slots; a held MUTE and a held MUTATE across a switch
+    go(PERF);
+    CHECK(!P->pat_overlay && sim::led(P->cur, 11) == WHITE, "PERFORM shows the slots on row 12 (the overlay closes with a page change)");
+    tap(3, 11);
+    CHECK(P->queued_slot() == 3, "a slot picked there is queued");
+    const c12::pocket_pattern b3 = P->bank[3].pat;
+    sim::touch(0, 0, 120); // MUTE DRUM 1, held
+    sim::touch(0, 5, 120); // MUTATE small, held
+    run_ms(40);
+    CHECK(!c12::c12_mix_audible(0) && P->alt_strength, "held MUTE and MUTATE");
+    until_switch(3000);
+    run_ms(40);
+    CHECK(P->cur == 3 && !c12::c12_mix_audible(0), "a held MUTE goes on through a pattern switch");
+    CHECK(P->alt_strength && memcmp(&P->alt[P->alt_live].cell[0][0], &P->bank[13].pat.cell[0][0], 64 * 4) != 0 &&
+              memcmp(&b3, pat(), sizeof b3) == 0,
+          "MUTATE now plays a mutation of the new pattern; no stored pattern changes");
+    sim::release(0, 0);
+    sim::release(0, 5);
+    run_ms(40);
+    CHECK(c12::c12_mix_audible(0) && !P->alt_strength, "let go: as written");
+    // a delay tail goes on through a switch to an empty slot; no clipping, no underruns
+    for (int t = 0; t < 7; t++) P->dsend[t] = 112;
+    P->apply_mixer();
+    c12::c12_fx_set(c12::c12x_fx_dly_feedback, 70);
+    c12::c12_fx_set(c12::c12x_fx_space_engine, 0);
+    run_ms(1500);
+    tap(14, 11); // slot 15: a variation (has steps); 13: cleared below
+    hold_tap(13, 4, 0, 0); // (PERFORM row 5 is not CLEAR: nothing)
+    go(SEQ);
+    tap(SEQ, 15);
+    hold_tap(13, 4, 10, 0); // slot 11 empty
+    tap(10, 0);
+    c12::c12_engine_stats st0;
+    c12::c12_engine_stats_read(&st0);
+    until_switch(3000);
+    const size_t at = session.size();
+    run_ms(300);
+    CHECK(P->cur == 10 && rms_since(at) > 30, "switched to an empty pattern, the delay's tail plays on (rms %.0f)", rms_since(at));
+    c12::c12_engine_stats st1;
+    c12::c12_engine_stats_read(&st1);
+    CHECK(st1.underruns == st0.underruns && st1.clipped == st0.clipped && c12::c12_seq_late() == 0, "no underruns, no clipping, no late switch");
+    for (int t = 0; t < 7; t++) P->dsend[t] = 0;
+    P->apply_mixer();
+
+    // saving and loading: every slot, the slot playing, the chain, QUANT
+    stop_transport();
+    run_ms(40);
+    tap(2, 3); // QUANT: END
+    tap(5, 0);
+    c12::pocket_pattern saved[16];
+    for (int i = 0; i < 16; i++) saved[i] = slot_pat(i);
+    const int chain_len = P->chain_len, cur_saved = P->cur;
+    save();
+    hold_tap(13, 4, 2, 0);
+    hold_tap(0, 4, 7, 0);
+    tap(0, 3);
+    tap(8, 0);
+    load(save_text, save_len);
+    all = true;
+    for (int i = 0; i < 16; i++) all = all && slot_is(i, saved[i]);
+    CHECK(all && P->cur == cur_saved && memcmp(pat(), &saved[cur_saved], sizeof saved[0]) == 0, "a load restores all sixteen slots and the slot playing");
+    CHECK(P->chain_len == chain_len && P->chain_slot[0] == 3 && P->chain_rep[0] == 2 && P->quant == c12::C12_SWITCH_END, "and the chain and QUANT");
+    // a full bank, every step of every slot set, fits and round-trips
+    for (int i = 0; i < 16; i++) {
+      c12::pocket_pattern full;
+      memset(&full, 0, sizeof full);
+      full.last_page = 3;
+      for (int t = 0; t < 7; t++)
+        for (int s = 0; s < 64; s++) full.cell[t][s] = c12::c12x_cell(1 + (i * 7 + t + s) % 127, 0);
+      if (i == P->cur) { *P->edit_begin() = full; P->edit_commit(); }
+      else P->bank[i].pat = full;
+      saved[i] = full;
+    }
+    save();
+    const int full_bytes = P->capture_project(P->io_memory());
+    CHECK(full_bytes <= c12glue::C12_PSRAM_IO_BYTES && save_len < (int)sizeof save_text, "a full bank: %d bytes, %d of base64 (room: %d)", full_bytes, save_len,
+          c12glue::C12_PSRAM_IO_BYTES);
+    for (int i = 0; i < 16; i++) P->bank[i].pat.cell[0][0] = 0;
+    load(save_text, save_len);
+    all = true;
+    for (int i = 0; i < 16; i++) all = all && slot_is(i, saved[i]);
+    CHECK(all, "and loads back identical");
+    // a version-2 project (one pattern) loads into slot 1, the other slots empty
+    {
+      static c12glue::project_t o;
+      memset(&o, 0, sizeof o);
+      o.magic = c12glue::PROJECT_MAGIC;
+      o.version = 2;
+      o.bytes = (uint16_t)sizeof o;
+      o.cell[3][4] = c12::c12x_cell(88, 0);
+      o.last_page = 1;
+      o.swing = 57;
+      o.bpm = 111;
+      memcpy(o.kit, P->kit, sizeof o.kit);
+      for (int t = 0; t < 7; t++) o.level[t] = 100;
+      o.master = 100;
+      o.route = 0x7f;
+      for (int i = 0; i < 32; i++) o.fx[i] = (uint8_t)c12::c12_fx_get(i);
+      o.density = 50;
+      o.complexity = 50;
+      o.br_mask = 0x7f;
+      o.crc = c12::pocket_crc32(0, &o, (unsigned)__builtin_offsetof(c12glue::project_t, crc));
+      static char t[65536];
+      serialiser_t w(false, t, sizeof t);
+      int bytes = (int)sizeof o;
+      w.begin();
+      w.field_base64("clatter12", &o, bytes, bytes);
+      w.end();
+      load(t, w.len);
+      int others = 0;
+      for (int i = 1; i < 16; i++) others += hits(P->bank[i].pat);
+      CHECK(P->cur == 0 && vel(3, 4) == 88 && pat()->last_page == 1 && c12::pocket_seq_swing() == 57 && others == 0 && P->chain_len == 0,
+            "a version-2 project loads into slot 1 with its length and swing; the other slots empty");
+      // and saved again it is version 3
+      save();
+      load(save_text, save_len);
+      CHECK(vel(3, 4) == 88 && P->proj.version == 3, "saved again, as version 3");
+    }
+    CHECK(sizeof(clatter12) <= 128 * 1024, "with the bank, the panel object is %u bytes of 128 KB", (unsigned)sizeof(clatter12));
+    tap(SEQ, 15);
+    if (P->pat_overlay) tap(SEQ, 15);
   }
 
   // ================================================================ diagnostics (settings pages)
@@ -1200,6 +1508,10 @@ int main() {
   run_ms(8);
   sim::set_scroll_page(0);
   run_ms(8);
+#ifdef C12_PANEL_COMPACT
+  write_wav("build/sim/session_compact.wav", session.data(), (unsigned)(session.size() / 2), SAMPLE_FREQ);
+#else
   write_wav("build/sim/session.wav", session.data(), (unsigned)(session.size() / 2), SAMPLE_FREQ);
+#endif
   return CHECK_REPORT("panel (simulated)");
 }

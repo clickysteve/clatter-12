@@ -1,4 +1,4 @@
-# Hardware integration audit (2026-11-13, 0.0.5-exp)
+# Hardware integration audit (2026-11-13, 0.0.5-exp; updated for 0.0.6)
 
 CLATTER 12 against Plinky 12's public panel interface and firmware, before any device test. Every
 finding says what it rests on:
@@ -37,7 +37,7 @@ CI fetches it for `tools/check_api.py`.
 | **Static SRAM** | **The deciding finding.** Firmware 90bd with Grid and a panel with no static data (zone_plate, arcade_12) ends `.bss` at 0x2007b0bc: **20 292 bytes** before the end of main SRAM, from which the pico-sdk reserves the heap (2 KB by default) and fails the link if it does not fit. Ambiotica leaves 2 808 bytes. CLATTER 12 0.0.4 needed **140 KB** (`clatter_12.cpp`) or **40 KB** (`_psram`): neither could have linked | **source**: `tools/firmware_ram.py` reads crt0's data copy table and `.bss` bounds from the images |
 | Now | **1.7 KB** of static SRAM (`.bss` 1 656, `.data` 56), gc-linked, at every optimisation level. The LXR tables went to PSRAM (default); the engine's 39 KB of working memory to the panel object (`tools/amalgamate.py` `RELOCATE`, bit-identical); the 33 KB undo history to PSRAM. `make m33` fails above 8 KB | **test** (compile and panel-only link); the real link: **unknown** |
 | `_sram` variant | puts 15 KB of LXR code in SRAM: 17.2 KB static at `-O3`, beside a budget of about 18 KB less the heap. Kept for a measured experiment only | **test**; whether it links: **unknown**, likely not |
-| Panel arena | 128 KB, "always yours", the whole object. CLATTER 12's object: **75.2 KB** (UI state, project, scenes, engine memory 39 KB, reverb lines 26 KB). A `static_assert` stops a build over 128 KB | arena size: **source** (Plinky developers via SYSTEM_NOTES); size: **test** |
+| Panel arena | 128 KB, "always yours", the whole object. CLATTER 12's object: **103.2 KB** (0.0.6, with the 16-slot pattern bank 30.7 KB; engine memory 41 KB, reverb lines 26 KB). A `static_assert` stops a build over 128 KB | arena size: **source** (Plinky developers via SYSTEM_NOTES); size: **test** |
 | PSRAM | ~7.5 MB usable (`get_psram_size()`, the system FX delay's last 128 KB excluded). CLATTER 12: tables at 0 (100 KB), delay 128 KB in (256 KB), undo 384 KB in (33 KB of 64). Slow, "an order of magnitude", behind a small XIP cache shared with flash code; sequential good, scattered bad | **source**; layout: **test** (simulator) |
 | PSRAM access | The delay: one sequential stream each way. The tables: oscillators read a 2 KB band-limited row each (six voices), transients sequentially; the sine table (8 KB) is shared. Undo: 2 KB copies on core 0 when a change is made. **The XIP cache's behaviour with 144 KB of `-O3` code plus table reads is the largest performance unknown** | access patterns: **source**; cost: **unknown** |
 | Stack | Deepest chains (GCC's call graph, with the engine's two indirect calls followed): core 1 from `on_dsp` 760 B, core 0 from `on_ui` 664 B at `-O3`. Largest frames on them: the LXR's snare, hi-hat and cymbal block functions, 280-296 B (two 64-sample buffers). Guidance: stack objects under 128 B, 256 at most; the core-1 stack size is not published (pico-sdk default 2 KB) | **test**; stack sizes: **unknown** |
@@ -73,13 +73,16 @@ CI fetches it for `tools/check_api.py`.
 
 | | Finding | Evidence |
 |---|---|---|
-| Format | one `FIELD_BASE64("clatter12", ...)` in Plinky's JSON serialiser (`on_serialise`), versioned (magic, version, size, CRC-32); version 1 projects convert; a file that fails any check changes nothing | **source**, **test** (simulator's serialiser stand-in) |
+| Format | one `FIELD_BASE64("clatter12", ...)` in Plinky's JSON serialiser (`on_serialise`), versioned (magic, version, size, CRC-32). **Version 3** (0.0.6): the header and the 16 pattern slots, each omitted when empty, sparse when that is smaller; built and read in PSRAM, so the 128 KB arena holds no second copy. Versions 1 and 2 load into slot 1; a file that fails any check changes nothing | **source**, **test** (simulator's serialiser stand-in) |
+| Size | typical 1-4 KB; a full bank (every step of 16 four-bar slots) 29 KB, 40 KB of base64 in one field | **test**; the largest field Plinky's serialiser takes: **unknown** |
 | Staged loads | the field is cleared before reading (a missing field cannot keep an old value); the live state is copied into the staged object first, so a refused file leaves everything as it was | **source**, **test** |
 | Real serialiser | the size Plinky accepts in one base64 field, and whether `on_serialise` returning `true` after a refused field is right | **unknown** |
 
 ## 7. Source size
 
-473 KB (`--compact`, now with the glue's comments stripped too). The reported hardware failure was a
+477 KB (`--compact`: the glue's comments stripped, Pocket's packed tables written as string literals;
+`test_panel_sim_compact` plays the whole simulated session from it, sample-identical to the readable
+file). The reported hardware failure was a
 compile error, so Plinky's server accepted the 483 KB file of 0.0.4 for **Flash**: at least that much
 is taken (**source**: the report). The limit itself is not published ("arbitrary", raisable); about
 200 KB was reported by another author for an earlier IDE (**unknown**).

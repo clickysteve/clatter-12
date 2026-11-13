@@ -761,6 +761,211 @@ static void realtime(void)
 	CHECK(busiest <= 19, "rapid editing: at most 19 stages a callback (%u)", busiest);
 }
 
+
+/* ------------------------------------------------------------------ pattern switching */
+static struct pocket_pattern patA, patB;
+/* step k's block, from the block step 0 played at (straight, no swing): Pocket's own arithmetic */
+static uint32_t step_block(uint32_t b0, unsigned k, int bpm) { return b0 + ceil_div((uint64_t)k * S16, 20u * 64u * (uint32_t)bpm); }
+static unsigned step_events(int track, uint32_t from, uint32_t to, struct c12_trigger_event* ev, unsigned max)
+{
+	struct c12_trigger_event all[128];
+	const unsigned n = events(track, 1u << C12_TRIG_STEP, from, all, 128);
+	unsigned m = 0;
+	for (unsigned i = 0; i < n && m < max; i++)
+		if (all[i].block < to) ev[m++] = all[i];
+	return m;
+}
+/* render until the sequencer's position is `pos` (playing) */
+static void render_to_step(int pos)
+{
+	for (int i = 0; i < 20000 && pocket_seq_position() != pos; i++) c12_engine_render(blockPcm, 64);
+}
+static void patterns(void)
+{
+	struct c12_trigger_event ev[64];
+	const int bpm = 120;
+	/* A: two bars, a kick on every beat; B: one bar, a snare on every beat */
+	memset(&patA, 0, sizeof patA);
+	memset(&patB, 0, sizeof patB);
+	patA.last_page = 1;
+	for (int s = 0; s < 32; s += 4) patA.cell[0][s] = cell(100);
+	for (int s = 0; s < 16; s += 4) patB.cell[3][s] = cell(100);
+
+	/* BAR: queued in the first bar of A, it takes over at step 16, from B's first step */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	c12_seq_set_live_slot(0);
+	pocket_seq_play(1);
+	render_ms(10);
+	CHECK(events(0, 1u << C12_TRIG_STEP, 0, ev, 64) == 1, "A plays");
+	const uint32_t b0 = ev[0].block;
+	render_to_step(3);
+	CHECK(c12_seq_queue(&patB, 1, 50, C12_SWITCH_BAR) == 0 && c12_seq_queued(0) == C12_SWITCH_BAR, "B queued for the next bar");
+	render_ms(2200);
+	unsigned nk = step_events(0, 0, 0xffffffffu, ev, 64);
+	CHECK(nk == 4 && ev[3].block == step_block(b0, 12, bpm), "A's kicks up to the bar, none at its step 16 (%u)", nk);
+	unsigned ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	CHECK(ns >= 2 && ev[0].block == step_block(b0, 16, bpm) && ev[1].block == step_block(b0, 20, bpm),
+	      "B's first snare exactly where A's step 16 would have been, the next a beat later (%u, block %u vs %u)", ns,
+	      ns ? ev[0].block : 0, step_block(b0, 16, bpm));
+	CHECK(c12_seq_live_slot() == 1 && c12_seq_switches() == 1 && c12_seq_queued(0) == 0 && c12_seq_late() == 0,
+	      "the switch is made once, the slot reported, the queue empty");
+	CHECK(pocket_seq_pattern()->cell[3][0] == patB.cell[3][0] && pocket_seq_replaced()->cell[0][0] == patA.cell[0][0],
+	      "B is the pattern now; A, as it played, is the one replaced");
+	/* no drift: four bars on, B's beats are on the original grid */
+	render_ms(8000);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	int grid = 1;
+	for (unsigned k = 0; k < ns; k++) grid &= ev[k].block == step_block(b0, 16 + 4 * k, bpm);
+	CHECK(grid && ns >= 16, "after the switch every beat stays on the grid from the first PLAY (%u beats)", ns);
+
+	/* END: at the end of A's two bars */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t e0 = ev[0].block;
+	render_to_step(3);
+	c12_seq_queue(&patB, 2, 50, C12_SWITCH_END);
+	render_ms(4400);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	nk = step_events(0, 0, 0xffffffffu, ev + 32, 32);
+	CHECK(ns >= 1 && ev[0].block == step_block(e0, 32, bpm) && nk == 8, "END: B starts where A ends (step 32), all eight of A's kicks first (%u)", nk);
+
+	/* NOW: the next step, the position kept */
+	struct pocket_pattern patC;
+	memset(&patC, 0, sizeof patC);
+	patC.cell[3][5] = cell(100);
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t n0 = ev[0].block;
+	render_to_step(4);
+	c12_seq_queue(&patC, 3, 50, C12_SWITCH_NOW);
+	render_ms(300);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	CHECK(ns == 1 && ev[0].block == step_block(n0, 5, bpm) && pocket_seq_position() >= 5, "NOW: at the very next step, at the same position in the new pattern");
+
+	/* stopped: at once; PLAY plays it from its start */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	c12_seq_queue(&patB, 4, 54, C12_SWITCH_BAR);
+	c12_engine_render(blockPcm, 64);
+	CHECK(c12_seq_live_slot() == 4 && pocket_seq_pattern()->cell[3][0] && pocket_seq_swing() == 54, "stopped: the queued pattern (and its swing) at once");
+	pocket_seq_play(1);
+	render_ms(10);
+	CHECK(events(3, 1u << C12_TRIG_STEP, 0, ev, 64) == 1 && events(0, ALL_KINDS, 0, ev, 64) == 0, "PLAY plays it from the first step");
+
+	/* cancel */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_to_step(2);
+	c12_seq_queue(&patB, 1, 50, C12_SWITCH_BAR);
+	c12_seq_cancel();
+	render_ms(2400);
+	CHECK(step_events(3, 0, 0xffffffffu, ev, 64) == 0 && c12_seq_switches() == 0, "a cancelled switch never happens");
+
+	/* STOP at the end of the pattern */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patB;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_to_step(2);
+	c12_seq_queue(0, 0, 50, C12_SWITCH_STOP);
+	render_ms(4000);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	CHECK(ns == 4 && c12_seq_stops() == 1 && pocket_seq_position() == POCKET_SEQ_NOT_PLAYING, "STOP: the bar plays out (4 snares), then the sequencer stops (%u)", ns);
+
+	/* conditions start afresh: B's snare 1:2 sounds on B's first pass, not its second */
+	struct pocket_pattern patD = patB;
+	memset(patD.cell, 0, sizeof patD.cell);
+	patD.cell[3][0] = POCKET_CELL_WITH_CONDITION(cell(100), POCKET_CONDITION_1_2);
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(2100); /* into A's second pass of bar 1? into bar 2 */
+	c12_seq_queue(&patD, 5, 50, C12_SWITCH_END);
+	render_ms(6000);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	CHECK(ns == 2 && ev[1].block - ev[0].block == step_block(0, 32, bpm), "a 1:2 step plays on the new pattern's first pass, then every second (%u)", ns);
+
+	/* rolls and ratchets across a switch: A's ACCEL roll on its last step plays all its strokes into B's
+	   first bar, B's flam on its first step goes out ahead from the queued pattern, no stroke lost */
+	struct pocket_pattern patE, patF;
+	memset(&patE, 0, sizeof patE);
+	memset(&patF, 0, sizeof patF);
+	patE.cell[5][14] = C12_CELL_WITH_EXT(cell(100), C12_RATCHET_6, C12_CURVE_FLAT, C12_ROLL_ACCEL);
+	patE.cell[0][0] = cell(100);
+	patF.cell[3][0] = C12_CELL_WITH_EXT(cell(100), C12_RATCHET_1, C12_CURVE_FLAT, C12_ROLL_FLAM);
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patE;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t r0 = ev[0].block;
+	render_to_step(8);
+	c12_seq_queue(&patF, 6, 50, C12_SWITCH_BAR);
+	render_ms(1400);
+	const unsigned nh = events(5, ALL_KINDS, 0, ev, 64);
+	CHECK(nh == 6, "A's 6-stroke ACCEL roll from its step 14 plays every stroke across the switch (%u)", nh);
+	const unsigned nf = events(3, ALL_KINDS, 0, ev, 64);
+	CHECK(nf == 2 && ev[0].kind == C12_TRIG_GRACE && ev[0].block < step_block(r0, 16, bpm) && ev[1].block == step_block(r0, 16, bpm),
+	      "B's first-step flam: its grace ahead of the bar, from the queued pattern; the hit on the bar (%u)", nf);
+	struct c12_engine_stats st;
+	c12_engine_stats_read(&st);
+	CHECK(st.underruns == 0 && !clipped(), "no underruns, no clipping");
+
+	/* the lock: held and released before the boundary, the switch is on time */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t l0 = ev[0].block;
+	render_to_step(3);
+	c12_seq_queue(&patB, 1, 50, C12_SWITCH_BAR);
+	c12_seq_lock();
+	pocket_seq_set_cell(0, 8, 0); /* an edit of the pattern playing, under the lock */
+	c12_seq_unlock();
+	render_ms(2200);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	nk = step_events(0, 0, 0xffffffffu, ev + 32, 32);
+	CHECK(ns >= 1 && ev[0].block == step_block(l0, 16, bpm) && nk == 3, "an edit under the lock reaches the playing pattern, the switch stays on the bar");
+
+	/* a mutation playing (MUTATE) stops at the switch: the new pattern plays as written */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	static struct pocket_pattern mut;
+	memset(&mut, 0, sizeof mut);
+	for (int s = 0; s < 64; s++) mut.cell[3][s] = cell(60); /* the "mutation": snares everywhere */
+	c12_perf_set_alt(&mut.cell[0][0], 0x7f);
+	pocket_seq_play(1);
+	render_to_step(3);
+	c12_seq_queue(&patB, 1, 50, C12_SWITCH_BAR);
+	const uint32_t m0 = c12_engine_block_count();
+	render_to_step(17);
+	const uint32_t m1 = c12_engine_block_count();
+	render_ms(2100);
+	ns = step_events(3, m1, 0xffffffffu, ev, 64);
+	unsigned loud = 0;
+	for (unsigned k = 0; k < ns; k++) loud += ev[k].velocity == 100;
+	CHECK(step_events(3, m0, m1, ev, 64) > 0 && ns == loud && ns >= 3, "the mutation of A played until the bar; after it, B as written (%u)", ns);
+	c12_perf_set_alt(0, 0);
+}
+
 int main(void)
 {
 	c12_tables_bind(tableMem);
@@ -771,5 +976,6 @@ int main(void)
 	fill_density_scenes();
 	space();
 	realtime();
+	patterns();
 	return CHECK_REPORT("perform");
 }

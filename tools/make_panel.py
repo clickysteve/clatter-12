@@ -13,7 +13,7 @@ With --compact the engine block loses indentation and blank lines (it is generat
 comments left) and the glue its comments as well, to stay under the IDE's upload size limit (about 200 KB was reported by another
 panel author; Plinky's developers describe the limit as adjustable).
 """
-import argparse, os, re, subprocess
+import argparse, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,7 +27,8 @@ METADATA = """/*
   native Plinky 12 instrument. SEQ: seven LXR triggers on a 16-step pressure grid, variations,
   conditions and ratchets on held steps. SOUND: every LXR parameter of a voice, a row each. GEN:
   pattern generator and procedural kits with locks. MIX: levels, pans, sends. FX: the LXR's drive,
-  ring modulator and compressor. Saves to Plinky's song slots. Not verified on hardware.
+  ring modulator and compressor. 16 pattern slots with queued switching and chains. Saves to
+  Plinky's song slots. Not verified on hardware.
 
 CLATTER 12 %(version)s (%(commit)s). Build: %(config)s.
 */
@@ -89,6 +90,58 @@ def strip_comments(text):
     return "".join(out)
 
 
+def bytes_literal(vals):
+    """A C string literal (split into lines of adjacent literals) whose bytes are vals: printable
+    characters as themselves, the rest as octal escapes ('?' too, so no trigraph can form)."""
+    out, line = [], ""
+    for i, v in enumerate(vals):
+        c = chr(v)
+        if 0x20 <= v < 0x7f and c not in "\\\"?":
+            esc = c
+        else:
+            nxt = vals[i + 1] if i + 1 < len(vals) else None
+            # an octal escape takes up to three digits: pad it when a digit follows
+            esc = "\\%o" % v if nxt is None or not (0x30 <= nxt <= 0x37) else "\\%03o" % v
+        line += esc
+        if len(line) >= 160:
+            out.append('"%s"' % line)
+            line = ""
+    if line:
+        out.append('"%s"' % line)
+    return "\n".join(out)
+
+
+def shrink_engine(text):
+    """Size only, the same program: CLATTER Pocket's packed LXR tables (byte arrays of fixed size,
+    read through their own length fields, never with sizeof) as string literals, one byte longer
+    for the terminating zero; and the parameter table's offset expressions through two macros."""
+    n_tables = 0
+
+    def table(m):
+        nonlocal n_tables
+        vals = [int(v) for v in m.group(3).replace("\n", " ").split(",") if v.strip()]
+        if len(vals) != int(m.group(2)) or any(v < 0 or v > 255 for v in vals):
+            sys.exit("make_panel: %s is not a byte table of %s" % (m.group(1), m.group(2)))
+        n_tables += 1
+        return "static const uint8_t %s[%d] =\n%s;" % (m.group(1), len(vals) + 1, bytes_literal(vals))
+    text = re.sub(r"static const uint8_t (\w+_data)\[(\d+)\] = \{([\d,\s]+)\};", table, text)
+    if n_tables != 5:
+        sys.exit("make_panel: expected the 5 packed LXR tables, found %d" % n_tables)
+    m = re.search(r"static const struct place places\[END_OF_SOUND_PARAMETERS\] = \{.*?\};", text, re.S)
+    if not m:
+        sys.exit("make_panel: the parameter places table was not found")
+    body = m.group(0)
+    body, a = re.subn(r"\(\(uint16_t\)\(\((\d+)\) \* sizeof\((\w+)\[0\]\) \+ __builtin_offsetof\(__typeof__\(\2\[0\]\), ([\w.\[\]]+)\)\)\)",
+                      r"C12PA(\2,\1,\3)", body)
+    body, b = re.subn(r"\(uint16_t\)__builtin_offsetof\(__typeof__\((\w+)\), ([\w.\[\]]+)\)", r"C12PO(\1,\2)", body)
+    if a < 50 or b < 20:
+        sys.exit("make_panel: the places table did not take its macros (%d, %d)" % (a, b))
+    macros = ("#define C12PA(o,i,m) ((uint16_t)((i) * sizeof(o[0]) + __builtin_offsetof(__typeof__(o[0]), m)))\n"
+              "#define C12PO(o,m) (uint16_t)__builtin_offsetof(__typeof__(o), m)\n")
+    text = text[:m.start()] + macros + body + "\n#undef C12PA\n#undef C12PO" + text[m.end():]
+    return text
+
+
 def compact(text):
     out = []
     for line in text.split("\n"):
@@ -124,7 +177,7 @@ def main():
 
     engine = open(a.engine).read()
     if a.compact:
-        engine = compact(engine)
+        engine = compact(shrink_engine(engine))
     glue = open(a.glue).read()
     if a.compact:
         # the glue's comments are for reading the source (panel/clatter12.cpp, and _full.cpp)
