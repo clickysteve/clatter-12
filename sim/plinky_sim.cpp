@@ -76,10 +76,13 @@ uint32_t time_us() {
 int get_scroll_target_page(void) { return scroll_page; }
 int get_scroll_page(void) { return scroll_page; }
 void scroll_to_page(int page) { scroll_page = page < -1 ? -1 : page >= num_pages ? num_pages - 1 : page; }
-void panel_page_t::saveload(int slots, bool, int) {
-  // a placeholder: the slots as dim pads (Plinky draws its own picker here)
-  int y0 = scroll_page * 16;
-  for (int i = 0; i < slots && i < 16; ++i) set_led(i, y0 + 2, LED_RGB(6, 6, 2));
+// The first argument is the absolute y of the page the picker is drawn on (page * 16), as every
+// published panel passes it (16 for page 1, 32 for page 2). The sim records it; a picker drawn
+// anywhere but the page shown would be invisible and untouchable on a Plinky.
+static int saveload_y_ = -1;
+void panel_page_t::saveload(int y, bool, int) {
+  saveload_y_ = y;
+  for (int i = 0; i < 16; ++i) set_led(i, y + 2, LED_RGB(6, 6, 2)); // a placeholder for Plinky's picker
   saveloads++;
 }
 
@@ -205,6 +208,7 @@ void release(int x, int y) {
 void release_all() { memset(finger, 0, sizeof finger); }
 void set_num_pages(int n) { num_pages = n < 1 ? 1 : n > SIM_PAGES ? SIM_PAGES : n; }
 int saveload_calls() { return saveloads; }
+int saveload_y() { return saveload_y_; }
 const char *settings_name_shown() { return settings_name; }
 const char *settings_value_shown() { return settings_value; }
 int settings_bar_shown() { return settings_bar; }

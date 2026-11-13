@@ -155,7 +155,7 @@ struct serialiser_t {
 // The stock save/load page (blocks.h panel_page_t::saveload): the sim draws a placeholder and
 // counts the calls; saving and loading are driven by the test (sim::save, sim::load_into).
 struct panel_page_t {
-  void saveload(int slots, bool show_name = true, int flags = 0);
+  void saveload(int y, bool show_name = true, int flags = 0); // y: the page's absolute row (page * 16)
 };
 
 // ---- the panel base (blocks.h), the hooks CLATTER 12 overrides ----
@@ -195,6 +195,7 @@ void set_read_tick_us(uint32_t us);     // every time_us() reading moves time th
 uint32_t led(int x, int y);             // an LED of the page shown
 void set_num_pages(int n);              // the panel's get_num_pages (scroll_to_page clamps to it)
 int saveload_calls();
+int saveload_y();                       // the y the last save/load picker was drawn at
 const char *settings_name_shown();      // the last system-style settings page drawn: its name,
 const char *settings_value_shown();     // value
 int settings_bar_shown();               // and bar

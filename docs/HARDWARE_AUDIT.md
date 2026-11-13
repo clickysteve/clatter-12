@@ -49,6 +49,7 @@ CI fetches it for `tools/check_api.py`.
 |---|---|---|
 | Pages | `get_num_pages` = 8 (seven pages and Plinky's save page); each page is drawn at y = page × 16, as the community panels do | **source**; scrolling eight on a device: **unknown** (published panels use 2-5; no maximum published) |
 | Settings pages | `get_num_panel_settings_pages` = 7 (the diagnostics); drawn with Plinky's own `draw_system_style_settings_page`, as Life (17 settings pages), Ambiotica and Grid do; its return value (a touch's change) resets the counters | **source**; on a device: **unknown** |
+| **Save page** | **Bug found and fixed.** `panel_page_t::saveload`'s first argument is the absolute row of the page it draws on: every published panel passes `page × 16` (Spiegel and mpe_test 16 for page 1; Pendulum, Kristallwuchs, Arcade 32 for page 2). CLATTER 12 passed 16 from page 7, which would have drawn Plinky's save picker on page 1's rows: invisible and untouchable on the SAVE page, so saving from the device would not have worked. It passes `PAGE_SAVE * 16` now; the simulator records the argument and the test checks it | **source**; on a device: **unknown** |
 | Touch | raw reads (`get_touch_pressed`/`down`, origin), not Plinky's widgets: Plinky's developers recommend widgets for slide and debounce handling | **source**; whether it matters for CLATTER 12's pads: **unknown** |
 
 ## 4. Audio callback

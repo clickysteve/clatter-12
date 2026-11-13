@@ -373,6 +373,7 @@ int main() {
   go(REPEAT);
   go(SAVE);
   CHECK(get_scroll_page() == SAVE && sim::saveload_calls() > 0, "SAVE shows Plinky's save/load page");
+  CHECK(sim::saveload_y() == SAVE * 16, "the save/load picker is drawn on the SAVE page's own rows (page * 16)");
   scroll_to_page(SEQ); // the side buttons (Plinky's)
   run_ms(8);
   run_ms(500);

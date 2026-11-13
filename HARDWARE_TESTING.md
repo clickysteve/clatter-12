@@ -110,7 +110,9 @@ Change tempo quickly for ten seconds while playing: LATE stays 0.
 uses) and repeat stage 5: the log adds `cycles .. max .. (N MHz)`, the real core clock and cycles per
 block, which turn QEMU's instruction counts into a real estimate. Then flash `clatter_12.cpp` again.
 
-**9. Saving and reloading.** Program a pattern, set levels and a kit, SAVE page: save to a slot. Change
+**9. Saving and reloading.** The SAVE page must show Plinky's slot picker on its own grid (before
+0.0.5 it was drawn off-page: report it if the page is blank). Program a pattern, set levels and a kit,
+save to a slot. Change
 everything. Load the slot: the sound fades out, there is a short silence, and it fades back in with
 the saved project (the reverb tail stops at a load, by design). Load a slot saved by 0.0.4 if you
 have one: it must load. Power-cycle and load again.

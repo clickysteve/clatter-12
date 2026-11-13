@@ -2373,7 +2373,9 @@ struct clatter12 : panel_t {
       repeat_background();
       perf_apply();
       leds_clear();
-      save_page.saveload(16, true, FLAG_PICKER_ENABLE_DELETE);
+      // the picker's first argument is this page's absolute row, as on every published panel
+      // (page 1: 16, page 2: 32); before 0.0.5 this passed 16, which put the picker on page 1's rows
+      save_page.saveload(PAGE_SAVE * 16, true, FLAG_PICKER_ENABLE_DELETE);
       return;
     }
     // touches of a page that is no longer shown are finished
