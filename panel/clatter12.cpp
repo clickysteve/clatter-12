@@ -86,13 +86,35 @@ static const uint8_t rate_levels[8] = {127, 100, 80, 60, 45, 32, 20, 10};
 // ---- shared with core 1 (single aligned words) ----
 static volatile uint32_t g_ready;          // engine initialised; released by core 0
 static uint32_t g_failed;                  // bring-up failed: shown as a red pad, not retried
-static volatile uint32_t g_dsp_us_last, g_dsp_us_max, g_dsp_us_sum, g_dsp_blocks;
-static int16_t g_out[BLOCK_SIZE * 2] __attribute__((aligned(4)));
+// Diagnostics (the DSP settings pages, the log): written by core 1 only, once per callback, read by
+// core 0. Times from time_us(), the RP2350's 1 MHz hardware timer: two reads per callback.
+struct diag_t {
+  uint32_t n;            // callbacks timed
+  uint32_t sum_us;       // their time, summed (wraps; core 0 takes differences)
+  uint32_t last_us, max_us;
+  uint32_t over;         // callbacks whose own work took longer than a block lasts (BLOCK_SIZE / SAMPLE_FREQ)
+  uint32_t near;         // ... longer than 85 % of it
+  uint32_t late;         // callbacks that started more than 1.25 blocks after the one before
+  uint32_t max_gap_us;   // the longest time from one callback's start to the next
+  uint32_t last_start;   // 0: the next start is not compared (first callback, after a hold)
+  uint32_t held;         // callbacks spent silent for a project load (hold_engine)
+  uint32_t reset_seen;   // the last reset core 0 asked for that core 1 has done
+  uint32_t cyc_last, cyc_max; // CPU cycles (C12_DIAG_CYCLES builds only; 0 otherwise)
+};
+static diag_t g_diag;
+static volatile uint32_t g_diag_reset; // core 0 increments: core 1 clears the peaks and counts
+// Project loads (on_prepare_staged_load): core 0 asks core 1 to stop touching the engine, so the
+// copy Plinky makes of the panel object (the engine's memory included) is a consistent one.
+static volatile uint32_t g_hold_req, g_hold_ack;
+static uint32_t g_hold_t0;
+static const uint32_t HOLD_WAIT_US = 20000;     // how long a load waits for core 1 to answer
+static const uint32_t HOLD_TIMEOUT_US = 10000000; // a hold no load finishes is let go after this
 // The LXR's unpacked constant tables, 102 240 bytes (C12_TABLE_BYTES in core/c12_engine.h).
-//   C12_TABLES_IN_PSRAM 0: static SRAM, outside the 128 KB panel arena;
-//   C12_TABLES_IN_PSRAM 1: the start of PSRAM (oscillator reads go through the XIP cache).
+//   C12_TABLES_IN_PSRAM 1 (default): the start of PSRAM (oscillator reads go through the XIP cache).
+//   C12_TABLES_IN_PSRAM 0: static SRAM. Does NOT fit Plinky's firmware 90bd, which leaves a panel
+//     about 20 KB of static SRAM (HARDWARE_TESTING.md, "Memory"); kept for comparison only.
 #ifndef C12_TABLES_IN_PSRAM
-#define C12_TABLES_IN_PSRAM 0
+#define C12_TABLES_IN_PSRAM 1
 #endif
 static const uint32_t C12_TABLE_BYTES_GLUE = 102240u;
 #if !C12_TABLES_IN_PSRAM
@@ -106,6 +128,28 @@ static void *table_memory() {
 #endif
 }
 static uint32_t clock_us() { return (uint32_t)time_us(); }
+// Opt-in (C12_DIAG_CYCLES 1, the _cycles build): the Cortex-M33's DWT cycle counter on core 1, to
+// learn the real core clock and cycles per block. It writes two debug registers (DEMCR.TRCENA,
+// DWT_CTRL.CYCCNTENA), which a debugger also uses; never in the default build or the emulator.
+#ifndef C12_DIAG_CYCLES
+#define C12_DIAG_CYCLES 0
+#endif
+#if C12_DIAG_CYCLES && !defined(WASM) && !defined(EMU) && defined(__arm__)
+static bool cycles_on() {
+  static int state; // 0 not tried, 1 counting, -1 not available
+  if (!state) {
+    volatile uint32_t *demcr = (volatile uint32_t *)0xE000EDFCu, *ctrl = (volatile uint32_t *)0xE0001000u;
+    *demcr |= 1u << 24;                                  // TRCENA
+    if (*ctrl & (1u << 25)) state = -1;                  // NOCYCCNT: no cycle counter
+    else { *ctrl |= 1u; state = 1; }                     // CYCCNTENA
+  }
+  return state > 0;
+}
+static inline uint32_t cycles_now() { return *(volatile uint32_t *)0xE0001004u; }
+#else
+static inline bool cycles_on() { return false; }
+static inline uint32_t cycles_now() { return 0; }
+#endif
 
 // the faintest tier: about 3 of 31 on a full channel (1 of 31 is reported invisible on the device)
 static inline uint32_t faint(uint32_t c) { return fade_col(c, 28); }
@@ -164,7 +208,10 @@ struct project_v1_t {
   uint8_t reserved[16];
   uint32_t crc;
 };
-static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay's lines, after the tables' room
+// PSRAM, from get_psram_ptr(): what lives where (get_psram_size() is about 7.5 MB on a Plinky 12)
+static const int C12_PSRAM_SPACE_OFFSET = 128 * 1024; // the delay's lines (256 KB), after the tables' room
+static const int C12_PSRAM_UNDO_OFFSET = 384 * 1024;  // the undo history (64 KB reserved)
+static const int C12_PSRAM_UNDO_BYTES = 64 * 1024;
 // REPEAT page: rates (row 4) and beat-repeat lengths (row 9), as c12 divisions
 static const uint8_t rep_rates[16] = {c12::c12x_div_4, c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_64, 0,
                                       c12::c12x_div_4t, c12::c12x_div_8t, c12::c12x_div_16t, c12::c12x_div_32t, 0,
@@ -241,7 +288,9 @@ struct clatter12 : panel_t {
   // kit: what the engine is sent (c12_kit_set_target)
   uint8_t kit[c12::c12x_kit_params];
   // undo and redo: a ring of states; undo swaps the present with the one before
-  c12glue::snapshot_t hist[c12glue::UNDO_DEPTH];
+  // the history itself is in PSRAM (C12_PSRAM_UNDO_OFFSET): copied only when a change is made or
+  // undone, on core 0, and 33 KB the 128 KB arena is better without. nullptr: no PSRAM, no undo.
+  c12glue::snapshot_t *hist;
   c12glue::snapshot_t scratch;
   uint8_t hist_at, hist_undo, hist_redo, last_undo_kind;
   uint32_t last_undo_us;
@@ -324,6 +373,7 @@ struct clatter12 : panel_t {
     route = 0x7f;
     master = (uint8_t)c12::c12x_level_unity;
     memset(kit, 0, sizeof(kit));
+    hist = undo_memory();
     hist_at = hist_undo = hist_redo = 0;
     last_undo_kind = c12glue::UNDO_OTHER;
     last_undo_us = 0;
@@ -363,11 +413,15 @@ struct clatter12 : panel_t {
     memset(meter, 0, sizeof(meter));
     memset(space_meter, 0, sizeof(space_meter));
     memset(&prof_acc, 0, sizeof(prof_acc));
+    memset(&dv, 0, sizeof(dv));
+    log_n = log_sum = 0;
+    diag_stages_max = diag_underruns0 = 0;
+    memset(out_block, 0, sizeof(out_block));
     oy = 0;
   }
 
   int get_num_pages(void) override { return c12glue::PAGES; }
-  int get_num_panel_settings_pages(void) override { return 1; }
+  int get_num_panel_settings_pages(void) override { return DIAG_PAGES; }
   int get_version(void) override { return c12glue::PROJECT_VERSION; }
   int get_num_tracks(void) override { return c12glue::TRACKS; }
   const char *get_track_name(int i, char buf[16]) override {
@@ -390,6 +444,12 @@ struct clatter12 : panel_t {
     void *tables = table_memory();
     if (!tables) {
       printf("clatter12: no memory for the LXR tables\n");
+      g_failed = 1;
+      return;
+    }
+    // the engine's working memory: this object (Plinky's panel arena), never static SRAM
+    if (c12::c12_engine_ram_bind(&engine_ram, (unsigned)sizeof(engine_ram)) != 0) {
+      printf("clatter12: engine memory not aligned\n");
       g_failed = 1;
       return;
     }
@@ -428,23 +488,87 @@ struct clatter12 : panel_t {
     (void)audiobuf_in;
     (void)audiobuf_out;
     if (!__atomic_load_n(&g_ready, __ATOMIC_ACQUIRE)) return false; // mix buffers arrive cleared: silence
-    uint32_t t0 = time_us();
-    c12::c12_engine_render(g_out, BLOCK_SIZE);
-    for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = g_out[i];
-    // the sends: Plinky's own delay and reverb (its standard chain follows when we return false)
-    const int32_t *d = c12::c12_engine_send(0), *r = c12::c12_engine_send(1);
-    if (d && r)
-      for (int i = 0; i < BLOCK_SIZE; ++i) {
-        mix_buffers_out->delaysend[i] = d[i];
-        mix_buffers_out->reverbsend[i] = r[i];
+    const uint32_t t0 = time_us();
+    const uint32_t c0 = cycles_on() ? cycles_now() : 0;
+    diag_t &d = g_diag;
+    const uint32_t rq = __atomic_load_n(&g_diag_reset, __ATOMIC_ACQUIRE);
+    if (rq != d.reset_seen) {
+      d.max_us = d.over = d.near = d.late = d.max_gap_us = d.cyc_max = 0;
+      d.reset_seen = rq;
+    }
+    // A project load holds the engine (hold_engine): one more block, faded out, then silence and
+    // nothing of the engine touched until core 0 lets go; the first block after fades in.
+    int fade = 0; // -1 out, +1 in
+    if (__atomic_load_n(&g_hold_req, __ATOMIC_ACQUIRE)) {
+      d.last_start = 0;
+      if (__atomic_load_n(&g_hold_ack, __ATOMIC_RELAXED)) {
+        d.held++;
+        for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = 0;
+        for (int i = 0; i < BLOCK_SIZE; ++i) mix_buffers_out->delaysend[i] = mix_buffers_out->reverbsend[i] = 0;
+        return false;
       }
-    uint32_t dt = time_us() - t0;
-    g_dsp_us_last = dt;
-    if (dt > g_dsp_us_max) g_dsp_us_max = dt;
-    g_dsp_us_sum += dt;
-    g_dsp_blocks++;
+      fade = -1;
+    } else if (__atomic_load_n(&g_hold_ack, __ATOMIC_RELAXED)) {
+      __atomic_store_n(&g_hold_ack, 0u, __ATOMIC_RELAXED);
+      fade = 1;
+    }
+    c12::c12_engine_render(out_block, BLOCK_SIZE);
+    // the sends: Plinky's own delay and reverb (its standard chain follows when we return false)
+    const int32_t *ds = c12::c12_engine_send(0), *rs = c12::c12_engine_send(1);
+    if (!fade) {
+      for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = out_block[i];
+      if (ds && rs)
+        for (int i = 0; i < BLOCK_SIZE; ++i) {
+          mix_buffers_out->delaysend[i] = ds[i];
+          mix_buffers_out->reverbsend[i] = rs[i];
+        }
+    } else {
+      for (int i = 0; i < BLOCK_SIZE; ++i) {
+        const int g = fade > 0 ? i * 256 / BLOCK_SIZE : (BLOCK_SIZE - 1 - i) * 256 / BLOCK_SIZE; // Q8
+        mix_buffers_out->dry[2 * i] = out_block[2 * i] * g >> 8;
+        mix_buffers_out->dry[2 * i + 1] = out_block[2 * i + 1] * g >> 8;
+        mix_buffers_out->delaysend[i] = ds && rs ? ds[i] * g >> 8 : 0;
+        mix_buffers_out->reverbsend[i] = ds && rs ? rs[i] * g >> 8 : 0;
+      }
+      if (fade < 0) {
+        __atomic_store_n(&g_hold_ack, 1u, __ATOMIC_RELEASE); // the engine is left alone from here
+        return false;
+      }
+    }
+    // timing: this callback's own work, its share of the block, and when it started
+    const uint32_t t1 = time_us(), dt = t1 - t0;
+    const uint32_t block_us = (uint32_t)BLOCK_SIZE * 1000000u / (uint32_t)SAMPLE_FREQ;
+    d.last_us = dt;
+    if (dt > d.max_us) d.max_us = dt;
+    d.sum_us += dt;
+    d.n++;
+    if (dt > block_us) d.over++;
+    if (dt * 100u > block_us * 85u) d.near++;
+    if (d.last_start) {
+      const uint32_t gap = t0 - d.last_start;
+      if (gap > d.max_gap_us) d.max_gap_us = gap;
+      if (gap * 4u > block_us * 5u) d.late++;
+    }
+    d.last_start = t0 ? t0 : 1u;
+    if (c0) {
+      const uint32_t cy = cycles_now() - c0;
+      d.cyc_last = cy;
+      if (cy > d.cyc_max) d.cyc_max = cy;
+    }
     return false;
   }
+  // ---- project loads: hold core 1 away from the engine while Plinky copies this object ----
+  static void hold_engine() {
+    using namespace c12glue;
+    g_hold_t0 = time_us();
+    __atomic_store_n(&g_hold_req, 1u, __ATOMIC_RELEASE);
+    // core 1 answers within one block; bounded both by time and by count (the emulator's clock
+    // may not move while this waits, and a core 1 that is not running never answers)
+    for (uint32_t spin = 0; !__atomic_load_n(&g_hold_ack, __ATOMIC_ACQUIRE) && spin < 2000000u; ++spin)
+      if (time_us() - g_hold_t0 > HOLD_WAIT_US) break;
+  }
+  static void release_engine() { __atomic_store_n(&c12glue::g_hold_req, 0u, __ATOMIC_RELEASE); }
+  static bool engine_held() { return __atomic_load_n(&c12glue::g_hold_req, __ATOMIC_ACQUIRE) != 0; }
 
   // ------------------------------------------------------------------ page-relative grid access
   int oy; // the current page's first row in Plinky's page canvas (page * 16)
@@ -502,9 +626,16 @@ struct clatter12 : panel_t {
     memcpy(kit, s.kit, sizeof(s.kit));
     apply_kit();
   }
+  static c12glue::snapshot_t *undo_memory() {
+    using namespace c12glue;
+    static_assert(sizeof(snapshot_t) * UNDO_DEPTH <= (size_t)C12_PSRAM_UNDO_BYTES, "undo history fits its PSRAM room");
+    if (get_psram_size() < (uint32_t)(C12_PSRAM_UNDO_OFFSET + C12_PSRAM_UNDO_BYTES)) return nullptr;
+    return (snapshot_t *)((uint8_t *)get_psram_ptr() + C12_PSRAM_UNDO_OFFSET);
+  }
   // call before a change; edits of one kind close together are one undo
   void push_undo(int kind, uint32_t now) {
     using namespace c12glue;
+    if (!hist) return;
     if (kind != UNDO_OTHER && kind == last_undo_kind && now - last_undo_us < MERGE_US && hist_undo) {
       last_undo_us = now;
       return;
@@ -518,7 +649,7 @@ struct clatter12 : panel_t {
   }
   void undo() {
     using namespace c12glue;
-    if (!hist_undo) return;
+    if (!hist || !hist_undo) return;
     hist_at = (uint8_t)((hist_at + UNDO_DEPTH - 1) % UNDO_DEPTH);
     take(scratch);
     restore(hist[hist_at]);
@@ -529,7 +660,7 @@ struct clatter12 : panel_t {
   }
   void redo() {
     using namespace c12glue;
-    if (!hist_redo) return;
+    if (!hist || !hist_redo) return;
     take(scratch);
     restore(hist[hist_at]);
     hist[hist_at] = scratch;
@@ -1983,10 +2114,20 @@ struct clatter12 : panel_t {
     return true;
   }
   static bool g_ready_now() { return c12glue::g_ready != 0; }
+  void on_load_finished(void) override {
+    panel_t::on_load_finished();
+    release_engine();
+  }
   // Before a load is read, the staged copy is given this panel's present state, so a file that is
   // refused (or lacks CLATTER 12's field) leaves everything as it was when the copy replaces it.
+  // The engine's memory is in this object too (engine_ram), and core 1 writes it every block: it
+  // is held first (hold_engine: one faded block, then silence), so the copy is of a still engine,
+  // and Plinky's commit, which writes the staged object back over this one, returns it unchanged.
+  // The hold ends when the load is applied (on_ui), finishes (on_load_finished) or, failing both,
+  // after HOLD_TIMEOUT_US.
   bool on_prepare_staged_load(panel_t *staged, size_t panel_memory_size) override {
     if (staged && panel_memory_size >= sizeof(*this)) {
+      if (g_ready_now()) hold_engine();
       // everything but the reverb lines (the last member; the staged object's are silent)
       const size_t state = (size_t)((const uint8_t *)verb_lines - (const uint8_t *)this);
       memcpy((void *)staged, (const void *)this, state);
@@ -1995,19 +2136,123 @@ struct clatter12 : panel_t {
     return panel_t::on_prepare_staged_load(staged, panel_memory_size);
   }
 
-  // ------------------------------------------------------------------ DSP page and log
-  void draw_perf_page() {
+  // ------------------------------------------------------------------ diagnostics: settings pages and log
+  // The panel settings pages above SEQ (right side button up), Plinky's own system-style pages, so
+  // no musical page is given up for them. Each shows one reading:
+  //   -1 DSP   core 1's load: this panel's own on_dsp time as a share of the block (2000 us at 32 kHz),
+  //            averaged over the last half second
+  //   -2 PEAK  the longest callback since the last reset, as a share. Touch its value: reset every
+  //            peak and count on these pages
+  //   -3 OVER  callbacks whose own work outlasted the block (the bar: the share over 85 % lately)
+  //   -4 LATE  callbacks that started over 1.25 blocks after the one before (Plinky's audio loop
+  //            stalled or a callback overran: the nearest a panel can see to an output underrun),
+  //            plus the converter's own underruns
+  //   -5 SPRD  DSP spreading: the most LXR stages one callback ran lately (12 = one LXR block)
+  //   -6 VOX   voices sounding now, and the effects running: D delay, R reverb, C colour (drive,
+  //            ring, compressor), P the sends going to Plinky's own effects
+  //   -7 MEM   the panel object's share of Plinky's 128 KB arena; ERR if the delay, the undo
+  //            history or the tables found no memory
+  // Plinky's output chain after on_dsp (it returns false) is not included: no panel can time it.
+  enum { DIAG_DSP = -1, DIAG_PEAK = -2, DIAG_OVER = -3, DIAG_LATE = -4, DIAG_SPRD = -5, DIAG_VOX = -6, DIAG_MEM = -7, DIAG_PAGES = 7 };
+  struct diag_view_t { uint32_t n, sum, near, t; int avg_pct, near_pct; };
+  diag_view_t dv;
+  uint32_t diag_stages_max, diag_underruns0;
+  static int block_us() { return (int)((uint32_t)BLOCK_SIZE * 1000000u / (uint32_t)SAMPLE_FREQ); }
+  // every frame: the half-second average and the share of near-deadline blocks, from core 1's sums
+  void diag_update(uint32_t now) {
     using namespace c12glue;
-    uint32_t n = g_dsp_blocks, sum = g_dsp_us_sum;
-    // a 64-frame block at SAMPLE_FREQ lasts 64e6/SAMPLE_FREQ us (2000 us at 32 kHz)
-    int block_us = (int)(BLOCK_SIZE * 1000000.f / (float)SAMPLE_FREQ);
-    int pct = n ? (int)((float)sum / (float)n * 100.f / (float)block_us) : 0;
-    char val[8];
-    // n blocks but no time: the clock does not move within a block (Plinky's emulator does this)
-    if (n && !sum) snprintf(val, sizeof(val), "n/a");
-    else snprintf(val, sizeof(val), "%d%%", pct);
-    draw_system_style_settings_page("DSP", val, clampi(pct, 0, 100));
+    if (now - dv.t < 500000u) return;
+    const uint32_t n = g_diag.n, sum = g_diag.sum_us, nr = g_diag.near;
+    const uint32_t dn = n - dv.n, ds = sum - dv.sum;
+    dv.avg_pct = dn ? (int)((uint64_t)ds * 100u / ((uint64_t)dn * (uint32_t)block_us())) : 0;
+    dv.near_pct = dn ? (int)((nr - dv.near) * 100u / dn) : 0;
+    dv.near = nr;
+    dv.n = n;
+    dv.sum = sum;
+    dv.t = now;
   }
+  void diag_reset() {
+    using namespace c12glue;
+    __atomic_store_n(&g_diag_reset, g_diag_reset + 1u, __ATOMIC_RELEASE);
+    diag_stages_max = 0;
+    c12::c12_engine_stats st;
+    c12::c12_engine_stats_read(&st);
+    diag_underruns0 = st.underruns;
+  }
+  static uint32_t load_col(int pct) { return pct < 70 ? LED_RGB(0, 31, 8) : pct < 85 ? LED_RGB(31, 24, 0) : LED_RGB(31, 0, 0); }
+  bool memory_ok() const {
+    return hist && get_psram_size() >= (uint32_t)(c12glue::C12_PSRAM_SPACE_OFFSET + c12::c12x_space_delay_bytes);
+  }
+  void draw_diag_page(int page) {
+    using namespace c12glue;
+    char val[24]; // four characters are shown; room for any number, so nothing is ever truncated
+    // n blocks but no time: the clock does not move within a block (Plinky's emulator does this)
+    const bool no_clock = g_diag.n && !g_diag.sum_us;
+    const int bu = block_us();
+    switch (page) {
+    case DIAG_DSP: {
+      if (no_clock) snprintf(val, sizeof(val), "n/a");
+      else snprintf(val, sizeof(val), "%d%%", dv.avg_pct);
+      draw_system_style_settings_page("DSP", val, clampi(dv.avg_pct, 0, 100), 0, 0, load_col(dv.avg_pct));
+      break;
+    }
+    case DIAG_PEAK: {
+      const int pk = (int)(g_diag.max_us * 100u / (uint32_t)bu);
+      if (no_clock) snprintf(val, sizeof(val), "n/a");
+      else snprintf(val, sizeof(val), "%d%%", pk);
+      if (draw_system_style_settings_page("PEAK", val, clampi(pk, 0, 100), 0, 0, load_col(pk))) diag_reset();
+      break;
+    }
+    case DIAG_OVER: {
+      const uint32_t o = g_diag.over;
+      snprintf(val, sizeof(val), "%u", (unsigned)(o > 9999 ? 9999 : o));
+      if (draw_system_style_settings_page("OVER", val, clampi(dv.near_pct, 0, 100), 0, 0, o ? RED : LED_RGB(0, 31, 8))) diag_reset();
+      break;
+    }
+    case DIAG_LATE: {
+      c12::c12_engine_stats st;
+      c12::c12_engine_stats_read(&st);
+      const uint32_t l = g_diag.late + (st.underruns - diag_underruns0);
+      snprintf(val, sizeof(val), "%u", (unsigned)(l > 9999 ? 9999 : l));
+      const int gap = (int)(g_diag.max_gap_us * 50u / (uint32_t)bu); // 2 blocks = full bar
+      if (draw_system_style_settings_page("LATE", val, clampi(gap, 0, 100), 0, 0, l ? RED : LED_RGB(0, 31, 8))) diag_reset();
+      break;
+    }
+    case DIAG_SPRD: {
+      snprintf(val, sizeof(val), "%u", (unsigned)diag_stages_max);
+      const int pct = (int)(diag_stages_max * 100u / 24u);
+      if (draw_system_style_settings_page("SPRD", val, clampi(pct, 0, 100), 0, 0, LED_RGB(0, 20, 31))) diag_reset();
+      break;
+    }
+    case DIAG_VOX: {
+      int voices = 0;
+      for (int t = 0; t < TRACKS; t++) voices += meter[t] > 64;
+      c12::c12_engine_stats st;
+      c12::c12_engine_stats_read(&st);
+      const bool space = !plinky_fx() && (space_meter[0] > 16 || space_meter[1] > 16 || any_send());
+      const bool colour = c12::c12_fx_get(c12::c12x_fx_drive_wet) || c12::c12_fx_get(c12::c12x_fx_ring_wet) ||
+                          c12::c12_fx_get(c12::c12x_fx_comp_wet);
+      int k = snprintf(val, sizeof(val), "%d", voices);
+      if (space && (any_dsend() || space_meter[0] > 16)) val[k++] = 'D';
+      if (space && (any_rsend() || space_meter[1] > 16) && k < 4) val[k++] = 'R';
+      if (colour && k < 4) val[k++] = 'C';
+      if (plinky_fx() && any_send() && k < 4) val[k++] = 'P';
+      val[k] = 0;
+      draw_system_style_settings_page("VOX", val, voices * 100 / TRACKS, 0, 0, LED_RGB(31, 20, 0));
+      break;
+    }
+    case DIAG_MEM: {
+      const int kb = (int)((sizeof(*this) + 1023) / 1024);
+      if (memory_ok()) snprintf(val, sizeof(val), "%dK", kb);
+      else snprintf(val, sizeof(val), "ERR");
+      draw_system_style_settings_page("MEM", val, kb * 100 / 128, 0, 0, memory_ok() ? LED_RGB(0, 31, 8) : RED);
+      break;
+    }
+    }
+  }
+  bool any_dsend() const { for (int t = 0; t < c12glue::TRACKS; t++) if (dsend[t]) return true; return false; }
+  bool any_rsend() const { for (int t = 0; t < c12glue::TRACKS; t++) if (rsend[t]) return true; return false; }
+  bool any_send() const { return any_dsend() || any_rsend(); }
 
   // levels on the grid: the engine's peaks, read (and reset) every frame, decaying between hits
   uint16_t meter[c12glue::TRACKS + 1];
@@ -2033,9 +2278,13 @@ struct clatter12 : panel_t {
     prof_acc.rs_us += pr.rs_us;
     prof_acc.limited += pr.limited;
     if (pr.total_max_us > prof_acc.total_max_us) prof_acc.total_max_us = pr.total_max_us;
+    if (pr.stages_max > prof_acc.stages_max) prof_acc.stages_max = pr.stages_max;
+    if (pr.stages_max > diag_stages_max) diag_stages_max = pr.stages_max;
   }
   c12::c12_engine_profile prof_acc;
 
+  // every 2 s with C12_PERF_LOG (Plinky's IDE: Connect for logging). Core 0, never core 1.
+  uint32_t log_n, log_sum;
   void log_line(uint32_t now) {
     using namespace c12glue;
     if (!C12_PERF_LOG) return;
@@ -2043,13 +2292,21 @@ struct clatter12 : panel_t {
     perf_t0 = now;
     c12::c12_engine_stats st;
     c12::c12_engine_stats_read(&st);
-    uint32_t n = g_dsp_blocks, sum = g_dsp_us_sum, mx = g_dsp_us_max;
-    g_dsp_us_max = 0;
+    const diag_t d = g_diag; // a copy: core 1 goes on writing
+    const uint32_t n = d.n - log_n, sum = d.sum_us - log_sum;
+    log_n = d.n;
+    log_sum = d.sum_us;
     unsigned c = prof_acc.calls ? prof_acc.calls : 1;
-    printf("c12 dsp avg %u max %u us (lxr %u mix %u rs %u); lxr %u/%u blocks (max %u per out); clip %u limited %u under %u\n",
-           (unsigned)(n ? sum / n : 0), (unsigned)mx, (unsigned)(prof_acc.lxr_us / c), (unsigned)(prof_acc.mix_us / c),
-           (unsigned)(prof_acc.rs_us / c), (unsigned)st.lxr_blocks, (unsigned)st.out_blocks, (unsigned)st.lxr_max_per_out,
-           (unsigned)st.clipped, (unsigned)prof_acc.limited, (unsigned)st.underruns);
+    printf("c12 dsp avg %u max %u us of %d (peak %u since reset); over %u near %u late %u gap %u us; "
+           "lxr %u mix %u rs %u us; stages max %u; lxr %u/%u blocks (max %u per out); clip %u limited %u under %u",
+           (unsigned)(n ? sum / n : 0), (unsigned)prof_acc.total_max_us, block_us(), (unsigned)d.max_us,
+           (unsigned)d.over, (unsigned)d.near, (unsigned)d.late, (unsigned)d.max_gap_us, (unsigned)(prof_acc.lxr_us / c),
+           (unsigned)(prof_acc.mix_us / c), (unsigned)(prof_acc.rs_us / c), (unsigned)prof_acc.stages_max,
+           (unsigned)st.lxr_blocks, (unsigned)st.out_blocks, (unsigned)st.lxr_max_per_out, (unsigned)st.clipped,
+           (unsigned)prof_acc.limited, (unsigned)st.underruns);
+    if (d.cyc_max) printf("; cycles %u max %u (%u MHz)", (unsigned)d.cyc_last, (unsigned)d.cyc_max,
+                          (unsigned)(d.last_us ? d.cyc_last / d.last_us : 0));
+    printf("\n");
     memset(&prof_acc, 0, sizeof(prof_acc));
   }
 
@@ -2063,6 +2320,12 @@ struct clatter12 : panel_t {
       leds_clear();
       set_led(0, 0, RED);
       return;
+    }
+    if (engine_held()) {
+      // a project is being loaded (on_prepare_staged_load): nothing touches the engine until it
+      // has been (load_pending, below), Plinky says it has finished, or it never comes
+      if (!load_pending && time_us() - c12glue::g_hold_t0 < c12glue::HOLD_TIMEOUT_US) return;
+      release_engine();
     }
     if (load_pending) {
       // a staged load replaced this object: its project is checked, now it reaches the engine
@@ -2093,9 +2356,11 @@ struct clatter12 : panel_t {
     int page = get_scroll_page();
     // what is held lasts only while a finger is on it: worked out afresh every frame
     memset(&held, 0, sizeof(held));
-    if (page == -1) {
+    diag_update(now);
+    if (page < 0 && page >= -DIAG_PAGES) {
+      repeat_background();
       perf_apply();
-      draw_perf_page();
+      draw_diag_page(page);
       return;
     }
     if (page < 0) return; // system pages draw themselves
@@ -2157,6 +2422,15 @@ struct clatter12 : panel_t {
   }
 
 
+  // core 1's output block (written and read only in on_dsp)
+  alignas(4) int16_t out_block[BLOCK_SIZE * 2];
+  // The engine's working memory (39 KB: the LXR's voices and parameters, Pocket's event ring and
+  // patterns, CLATTER 12's converter and buses; c12_engine_ram_bind). Here, in the panel arena,
+  // because Plinky's firmware leaves a panel only about 20 KB of static SRAM. Core 1 writes it
+  // every block: on_prepare_staged_load copies it only while core 1 is held (hold_engine), so
+  // the copy Plinky later writes back over this object is the state the engine was left in.
+  c12::c12_engine_ram engine_ram;
+
   // CLATTER 12's reverb lines (26 KB), in the panel's SRAM arena: the reverb reads them as six
   // scattered streams, which PSRAM (behind the XIP cache) serves badly. Last in the object (declare nothing after it), and
   // kept out of on_prepare_staged_load's copy: a load (Plinky copies the staged object over this
@@ -2164,3 +2438,5 @@ struct clatter12 : panel_t {
   // back a snapshot of an older tail. Not saved. The delay's lines (256 KB) are in PSRAM.
   alignas(4) int16_t verb_lines[c12::c12x_space_verb_bytes / 2];
 };
+// Plinky constructs the panel in a 128 KB arena; a panel that does not fit must not compile.
+static_assert(sizeof(clatter12) <= 128 * 1024, "CLATTER 12's panel object must fit Plinky's 128 KB panel arena");

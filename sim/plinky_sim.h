@@ -191,8 +191,13 @@ void release_all();
 void ui_frame_edges();                  // the driver calls this before each on_ui
 void set_scroll_page(int page);
 void advance_us(uint32_t us);           // move simulated time
+void set_read_tick_us(uint32_t us);     // every time_us() reading moves time this much (default 0)
 uint32_t led(int x, int y);             // an LED of the page shown
 void set_num_pages(int n);              // the panel's get_num_pages (scroll_to_page clamps to it)
 int saveload_calls();
+const char *settings_name_shown();      // the last system-style settings page drawn: its name,
+const char *settings_value_shown();     // value
+int settings_bar_shown();               // and bar
+void settings_touch(int delta);         // the next settings page drawn returns this delta
 void write_ppm(const char *path, int scale);
 } // namespace sim

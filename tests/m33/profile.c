@@ -10,6 +10,10 @@
  * Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only
  */
 #include "../../build/c12_engine_c.c"
+/* the engine's working memory is reached through pointers (tools/amalgamate.py, RELOCATE): the names
+   this file uses, as the engine text spells them */
+#define resampler (*c12r_resampler)
+#define outF (*c12r_outF)
 /* the generated text is preprocessed: its macros are gone (values from c12_engine.h, c12_space.h,
    pocket_lxr.h, pocket_kit.h; checked against the engine's own sizes in main) */
 #define C12_TABLE_BYTES 102240u
@@ -67,10 +71,10 @@ static void prof_render(int16_t* out_lr, unsigned frames)
 {
 	const uint32_t t0 = tk();
 	struct render_work w = { 0 };
-	const uint32_t need = c12_rs_needed(&rs, frames);
-	while (rs.count < need) prof_stage(&w);
+	const uint32_t need = c12_rs_needed(&resampler, frames);
+	while (resampler.count < need) prof_stage(&w);
 	uint32_t t = tk();
-	c12_rs_process(&rs, outF, frames);
+	c12_rs_process(&resampler, outF, frames);
 	for (unsigned i = 0; i < frames * 2; i++)
 	{
 		float v = outF[i];
@@ -86,19 +90,19 @@ static void prof_render(int16_t* out_lr, unsigned frames)
 	}
 	else
 	{
-		const uint32_t lag = (uint32_t)(rs.count > 16u ? rs.count - 16u : 0u);
+		const uint32_t lag = (uint32_t)(resampler.count > 16u ? resampler.count - 16u : 0u);
 		sendRead = sendWrite - lag;
 		sendFrac = 0;
 	}
 	acc(S_RS, dt(t));
 	if (spreadOn)
 	{
-		const uint32_t next = c12_rs_needed(&rs, frames);
+		const uint32_t next = c12_rs_needed(&resampler, frames);
 		unsigned block = 0;
 		for (unsigned k = 0; k < STG_N; k++) block += stage_weight(k);
-		const unsigned share = (unsigned)((uint64_t)block * frames * rs.in_rate / ((uint64_t)rs.out_rate * C12_LXR_BLOCK));
+		const unsigned share = (unsigned)((uint64_t)block * frames * resampler.in_rate / ((uint64_t)resampler.out_rate * C12_LXR_BLOCK));
 		int head = lxrStage == STG_HEAD;
-		while (w.weight < share && rs.count < next)
+		while (w.weight < share && resampler.count < next)
 		{
 			if (lxrStage == STG_HEAD)
 			{

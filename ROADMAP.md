@@ -52,6 +52,14 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
   - [x] Golden sessions and `tools/compare_builds.sh`: bit-identical to 0.0.3 with spreading off.
   - [x] Sanitizer run (ASan, UBSan): no memory errors; two negative shifts in CLATTER 12's mix fixed.
   - [x] HARDWARE_TESTING.md: backup, recovery, staged first test, stop conditions.
+- 0.0.5-exp, hardware build and diagnostics (docs/HARDWARE_AUDIT.md):
+  - [x] The hardware compile errors (missing field initialisers, sign compare) and everything after
+        them at `-O3`, `-O2`, `-Os` with warnings as errors: `make m33` checks it.
+  - [x] Static SRAM 143 KB → 1.7 KB: Plinky's firmware leaves about 20 KB (measured from its images).
+        Tables in PSRAM; the engine's memory in the panel object (bit-identical); undo in PSRAM.
+  - [x] Project loads hold the engine while Plinky copies the object (fade, silence, fade).
+  - [x] Diagnostics: seven settings pages (load, peak, overruns, late callbacks, spreading, voices and
+        effects, memory), resettable; an opt-in cycle-counter build.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 

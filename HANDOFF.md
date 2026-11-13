@@ -1,36 +1,30 @@
-# Handoff (2026-11-05, fourth session: performance and hardware readiness)
+# Handoff (2026-11-13, fifth session: hardware build, diagnostics, pattern banks)
 
-Read this, then HARDWARE_TESTING.md, TESTING.md ("CPU"), docs/DESIGN.md and ROADMAP.md.
+Read this, then docs/HARDWARE_AUDIT.md, HARDWARE_TESTING.md, TESTING.md and docs/DESIGN.md.
 
-**Where it is.** CLATTER 12 0.0.4-exp: the same instrument as 0.0.3 (seven pages, Plinky's save page,
-TEMPO on every page, CLATTER 12's delay and reverb, ratchets, rolls, PERFORM, REPEAT, scenes), made
-cheaper and more even to run. No musical features, no interface changes. Everything passes on the host
-(`make`: resampler 13, engine 37, perform 77, authentic 21, panel 201; `make test-wasm`: 33), compiles
-and link-checks for the Cortex-M33 (`make m33`), runs in QEMU (`make m33-bench`, `make m33-profile`),
-and renders the same audio as 0.0.3 sample for sample with spreading off
-(`sh tools/compare_builds.sh d854eda nospread`, also in CI). Not run in Plinky's emulator or on a
-Plinky 12; nothing has been flashed.
-
-**What changed and why** (TESTING.md has the figures)
-- The busiest callbacks used to render two whole LXR blocks. The engine now runs an LXR block as twelve
-  stages (Pocket's calls, in order) and, after a callback's output, starts on the next block up to the
-  callback's average share. QEMU, delay and reverb on, all tracks: busiest block 304 600 → 218 400
-  instructions (102 % → 73 % of 150 MHz at one cycle each); worst case 358 400 → 251 900.
-  `c12_engine_set_spread(0)` gives the old timing exactly; with it on, a control change can reach the
-  engine one LXR block (1.45 ms) later, never more (tested).
-- Converter bit-identical and a third cheaper; Pocket's unused Q23 stage gone; FX setters only when
-  their own values move; delay lines interleaved, effects idling separately.
-- The reverb's 26 KB of lines moved from PSRAM into the panel object (SRAM; the last member, kept out
-  of `on_prepare_staged_load`'s copy, so a load silences the reverb tail). The delay's 256 KB stay in
-  PSRAM as one sequential stream.
+**Where it is.** CLATTER 12 0.0.5-exp. Part 1 of this session (its own commit): the hardware compile
+errors fixed and checked at `-O3`/`-O2`/`-Os` with warnings as errors (`make m33`, `tools/hw_check.py`);
+**static SRAM cut from 143 KB to 1.7 KB**, because Plinky's firmware leaves a panel only about 20 KB
+(`tools/firmware_ram.py`, on firmware images Plinky's own pipeline built); seven diagnostic settings
+pages and a richer log line; project loads hold the engine while Plinky copies the object. Audio
+bit-identical to 0.0.4 (and 0.0.3 with spreading off). Not run in Plinky's emulator or on a device.
 
 **What the next session should do first**
-1. Plinky's IDE: paste `build/clatter_12.cpp` (483 KB), **Test**; HARDWARE_TESTING.md stage 0. If the
-   IDE refuses the size, ask Plinky (Test has taken 306 KB; ~200 KB is reported for Flash; lossless
-   compaction cannot reach 200 KB).
-2. On a device, HARDWARE_TESTING.md stages 1-10, recording the DSP page and the log line at each.
-   Stage 7 (delay and reverb, all tracks) is the figure this release was optimised for.
-3. If the load is too high: `clatter_12_sram.cpp` first; then ROADMAP.md §1.
+1. Plinky's IDE: paste `build/clatter_12.cpp` (473 KB), **Test**, then **Flash**: HARDWARE_TESTING.md.
+   A link error naming RAM would mean the firmware-image analysis was wrong: report it with the
+   firmware code. Stage 5's DSP and PEAK readings, and stage 8b's cycle log, decide the CPU question.
+2. If PSRAM tables prove slow, the sine table (8 KB, read by every oscillator) is the first candidate
+   for the panel object (75 KB of 128 used).
+
+**What changed in Part 1 and why**
+- The engine's zero-initialised file-scope objects (LXR voices and parameters, Pocket's ring and
+  patterns, CLATTER 12's converter and buses: 39 KB) are reached through pointers into a generated
+  struct (`tools/amalgamate.py` RELOCATE) that the panel holds (`engine_ram`). Same code, same values;
+  the tool fails if a relocated name is declared twice or has an initialiser. Adding a large static to
+  the engine? Add its name to RELOCATE, or `make m33` fails its 8 KB budget.
+- Because the engine's memory is in the object, `on_prepare_staged_load` holds core 1 before copying
+  (g_hold_req / g_hold_ack), and the hold ends on apply, `on_load_finished`, or 10 s.
+- Plinky's server very likely compiles at `-O3` (binary comparison, docs/HARDWARE_AUDIT.md §1).
 
 **How things connect** (as before, plus)
 - `third_party/clatter-pocket` is a pinned, unmodified submodule. Never edit it here. `core/c12_engine.c`
@@ -39,7 +33,7 @@ Plinky 12; nothing has been flashed.
   If the submodule moves, re-check `lxr_stage` against Pocket's `renderBlock` and run
   `tools/compare_builds.sh` against the last commit.
 - `tests/golden.c` + `tools/compare_builds.sh`: any optimisation must compare bit-identical with
-  `nospread`. `tools/compare_envelope.py` compares renders as sound (10 ms levels) when samples cannot.
+  `nospread`. `tools/hw_check.py` (in `make m33`) is the hardware build gate: keep it passing. `tools/compare_envelope.py` compares renders as sound (10 ms levels) when samples cannot.
 - `tests/m33/profile.c` includes the generated engine to time each stage; its stage weights are the
   numbers in `stage_weight` (`c12_engine.c`), which only decide where a callback stops.
 
@@ -47,10 +41,12 @@ Plinky 12; nothing has been flashed.
 experimental; no hardware claim without a device; do not change CLATTER Web or Pocket; the sound is
 the LXR's, never Plinky's synth renamed.
 
-**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (483 KB); how many
-pages a panel may have (CLATTER 12 has eight); free static SRAM for panels (40 KB + 100 KB tables); the
-real core-1 clock, whether output is buffered more than one block, and what Plinky's own output chain
-costs after `on_dsp` returns `false`; the server's compiler flags (`-Os` would cost about 20 % more
-instructions); whether `MIX_PARAM_*` can be set from a panel outside Plinky's slider widgets; the
-serialiser's exact semantics (does a `false` from `on_serialise` abort a load?); firmware licence vs
-GPL-3.0 for prebuilt images.
+**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (473 KB now; 483 KB
+reached the compiler); how many pages a panel may have (CLATTER 12 has eight, and seven settings
+pages); the heap size the firmware reserves and how much static SRAM a panel may count on (firmware
+90bd leaves 20 292 B above `.bss`); the core-1 stack size; the real core-1 clock, whether output is
+buffered more than one block, and what Plinky's own output chain costs after `on_dsp` returns
+`false`; the server's exact compiler flags (`-O3` inferred); `on_commit_staged_load_audio_thread`'s
+exact signature (CLATTER 12 does not override it); whether `MIX_PARAM_*` can be set from a panel
+outside Plinky's slider widgets; the serialiser's limits (largest base64 field) and semantics;
+firmware licence vs GPL-3.0 for prebuilt images.

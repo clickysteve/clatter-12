@@ -13,8 +13,8 @@ The pages are Plinky's own: the panel reports eight (`get_num_pages`), they stac
 Plinky's page canvas, and Plinky's right side buttons scroll through them as on any panel. Row 15's
 first eight pads jump straight to one (`scroll_to_page`). A pad held when the page changes is let
 go: performance pads never stick because a finger moved to the navigation. The page shown is the one lit white on row 15,
-and each page has its own colour on its pad. The panel settings page above SEQ (right side button up)
-shows the audio core's load. Changing page never touches the audio: the engine runs on core 1, and
+and each page has its own colour on its pad. Above SEQ (right side button up), seven panel settings
+pages show the diagnostics ("Diagnostics", below). Changing page never touches the audio: the engine runs on core 1, and
 the transport, tempo, kit streaming and meters are serviced every UI frame whatever page is shown.
 
 ## SEQ
@@ -212,7 +212,7 @@ sends, their returns joining the mix before the master gain and the limiter.
 
 Every control is checked to change the sound (`tests/test_perform.c`, `tests/test_panel_sim.cpp`
 "FX SPACE"). Memory: the delay's 256 KB of 16-bit lines in PSRAM (after the 128 KB the LXR tables
-may take in the `_psram` variant), the reverb's 26 KB in the panel object (SRAM). With nothing sent and
+take), the reverb's 26 KB in the panel object (SRAM). With nothing sent and
 the lines empty (their 16-bit samples truncate to exactly zero as a tail ends) an effect does not run
 at all: off costs nothing, and each idles on its own. Loading a project silences the reverb's tail.
 CPU: TESTING.md.
@@ -318,6 +318,26 @@ y 15   pages | TEMPO | LATCH . RELEASE | UNDO REDO STOP PLAY
   that rate. Shape: each repeat as loud, softer (-18 % each), or building. Kits and edits stay live. An
   audio-buffer repeat (stutter of the sound itself) is not built: it would need a buffer and CPU the
   budget does not have.
+
+## Diagnostics (settings pages above SEQ)
+
+The right side button up from SEQ scrolls through seven of Plinky's own system-style settings pages,
+one reading each, so no musical page is given up and nothing is drawn over a page in use:
+
+| Page | Reading |
+|---|---|
+| DSP | the audio core's load: this panel's `on_dsp` time as a share of the 2000 us block, over the last half second; green under 70 %, amber to 85 %, red above |
+| PEAK | the longest callback since reset. **Touch its value: every peak and count resets** (also on OVER, LATE and SPRD) |
+| OVER | callbacks whose own work outlasted the block (the bar: how often one passed 85 % lately) |
+| LATE | callbacks that started more than 1.25 blocks after the previous one, and the converter's underruns |
+| SPRD | DSP spreading: the most LXR stages one callback ran lately (12 a block) |
+| VOX | voices sounding, and the effects running (D delay, R reverb, C colour, P Plinky's effects) |
+| MEM | the panel object's size in Plinky's 128 KB arena; ERR if a memory region was not available |
+
+Timed with the RP2350's hardware microsecond timer, two readings per callback, written by core 1 only
+and read by core 0; no logging, formatting or allocation on core 1. Plinky's own output chain, which
+runs after `on_dsp`, cannot be timed by a panel and is not included. The `_cycles` build also reads
+the core's cycle counter, for the real clock. The log line every 2 s has all of it (HARDWARE_TESTING.md).
 
 ## Control kinds
 

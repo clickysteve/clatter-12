@@ -41,7 +41,7 @@ _Static_assert(C12_LXR_BLOCK == POCKET_LXR_BLOCK, "LXR block size");
 _Static_assert(C12_KIT_PARAMS >= POCKET_SOUND_PARAMS, "kit buffer");
 _Static_assert(C12_TRACKS == POCKET_SEQ_TRACKS, "tracks");
 
-static struct c12_resampler rs;
+static struct c12_resampler resampler;
 static float lxrF[C12_LXR_BLOCK * 2];
 static float outF[128 * 2];
 static volatile struct c12_engine_stats st;
@@ -840,6 +840,7 @@ void c12_mix_get(struct c12_mix_state* out)
 /* Only built packed (tools/amalgamate.py), where the tables are pointers (see PACKED_FIXES). */
 void c12_tables_bind(void* mem)
 {
+	(void)c12_ram_ensure(); /* host builds: the static working memory; the panel binds its own first */
 #ifdef POCKET_PACKED_TABLES
 	uint8_t* p = (uint8_t*)mem;
 	sine_table = (int16_t*)p;
@@ -972,6 +973,7 @@ static void fx_apply(void)
 int c12_engine_init(uint32_t out_rate, uint32_t seed)
 {
 	if (!tablesBound) return -1;
+	if (c12_ram_ensure() != 0) return -1;
 	if (pocket_lxr_init(seed) != 0) return -1;
 	/* Pocket's own mix is not used (mix_block below makes the same one, and more), so its DC
 	 * blocker and master gain are left at their cheapest. */
@@ -980,7 +982,7 @@ int c12_engine_init(uint32_t out_rate, uint32_t seed)
 	/* The sequencer counts engine samples: its rate is the LXR's, whose blocks are its clock. */
 	pocket_seq_init(C12_LXR_RATE, POCKET_LXR_BLOCK, seq_emit);
 	pocket_lxr_set_block_hook(block_hook);
-	if (c12_rs_init(&rs, C12_LXR_RATE, out_rate, 1.0f) != 0) return -1;
+	if (c12_rs_init(&resampler, C12_LXR_RATE, out_rate, 1.0f) != 0) return -1;
 	outRate = out_rate;
 	memset((void*)&st, 0, sizeof st);
 	memset((void*)&prof, 0, sizeof prof);
@@ -1407,7 +1409,7 @@ static IN_ITCM_RAM void lxr_stage(unsigned s)
 		break;
 	default:
 		mix_master();
-		c12_rs_push(&rs, lxrF, C12_LXR_BLOCK);
+		c12_rs_push(&resampler, lxrF, C12_LXR_BLOCK);
 		break;
 	}
 }
@@ -1447,10 +1449,10 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 	const uint32_t t0 = now_us();
 	struct render_work w = { 0, 0, t0, 0, 0, 0 };
 	/* this callback's output: every block it needs, finished */
-	const uint32_t need = c12_rs_needed(&rs, frames);
-	while (rs.count < need)
+	const uint32_t need = c12_rs_needed(&resampler, frames);
+	while (resampler.count < need)
 	{
-		if (lxrStage == STG_HEAD && c12_rs_room(&rs) < C12_LXR_BLOCK)
+		if (lxrStage == STG_HEAD && c12_rs_room(&resampler) < C12_LXR_BLOCK)
 		{
 			st.underruns++;
 			memset(out_lr, 0, frames * 2 * sizeof(int16_t));
@@ -1459,7 +1461,7 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 		run_stage(&w);
 	}
 	const unsigned rendered = w.blocks;
-	c12_rs_process(&rs, outF, frames);
+	c12_rs_process(&resampler, outF, frames);
 	uint32_t clipped = 0;
 	for (unsigned i = 0; i < frames * 2; i++)
 	{
@@ -1477,7 +1479,7 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 	else
 	{
 		/* keep the reader with the writer, so sends start clean */
-		const uint32_t lag = (uint32_t)(rs.count > 16u ? rs.count - 16u : 0u);
+		const uint32_t lag = (uint32_t)(resampler.count > 16u ? resampler.count - 16u : 0u);
 		sendRead = sendWrite - lag;
 		sendFrac = 0;
 	}
@@ -1487,17 +1489,17 @@ IN_ITCM_RAM void c12_engine_render(int16_t* out_lr, unsigned frames)
 	   later than without (tests/test_perform.c) */
 	if (spreadOn)
 	{
-		const uint32_t next = c12_rs_needed(&rs, frames);
+		const uint32_t next = c12_rs_needed(&resampler, frames);
 		unsigned block = 0;
 		for (unsigned k = 0; k < STG_N; k++) block += stage_weight(k);
-		const unsigned share = (unsigned)((uint64_t)block * frames * rs.in_rate / ((uint64_t)rs.out_rate * C12_LXR_BLOCK));
+		const unsigned share = (unsigned)((uint64_t)block * frames * resampler.in_rate / ((uint64_t)resampler.out_rate * C12_LXR_BLOCK));
 		int head = lxrStage == STG_HEAD; /* may this callback still start a block? */
 		w.t = now_us();
-		while (w.weight < share && rs.count < next)
+		while (w.weight < share && resampler.count < next)
 		{
 			if (lxrStage == STG_HEAD)
 			{
-				if (!head || c12_rs_room(&rs) < C12_LXR_BLOCK) break;
+				if (!head || c12_rs_room(&resampler) < C12_LXR_BLOCK) break;
 				head = 0;
 			}
 			run_stage(&w);

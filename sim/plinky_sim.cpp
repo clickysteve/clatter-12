@@ -64,7 +64,14 @@ int get_touch_origin_y(int x, int y) {
 void set_qn_period_us(int us, bool) { qn_period_us = us; }
 void stop_transport(int) { transport_state = TRANSPORT_STOPPED_AT_ZERO; }
 void start_transport(int) { transport_state = TRANSPORT_PLAYING; }
-uint32_t time_us() { return (uint32_t)now_us; }
+// each reading may move the clock (sim::set_read_tick_us), so code timed between two readings
+// takes a known, deterministic time; 0 (the default): time moves only between blocks and frames
+static uint32_t read_tick;
+uint32_t time_us() {
+  const uint32_t t = (uint32_t)now_us;
+  now_us += read_tick;
+  return t;
+}
 
 int get_scroll_target_page(void) { return scroll_page; }
 int get_scroll_page(void) { return scroll_page; }
@@ -154,10 +161,18 @@ void serialiser_t::field_base64(const char *name, void *data, int &bytes, int ma
 }
 static int ripples;
 void show_ripple(int16_t, int16_t, uint32_t) { ripples++; }
+// The sim records what the page shows (sim::settings_*), and returns a delta a test injected
+// (sim::settings_touch), as Plinky returns the change a touch on the page asks for.
+static char settings_name[8], settings_value[16];
+static int settings_bar, settings_pending;
 int draw_system_style_settings_page(const char *name4, const char *value4, int bar_percent, int, int, uint32_t) {
   leds_clear();
-  printf("[sim settings page] %s %s %d%%\n", name4, value4 ? value4 : "", bar_percent);
-  return 0;
+  snprintf(settings_name, sizeof settings_name, "%s", name4 ? name4 : "");
+  snprintf(settings_value, sizeof settings_value, "%s", value4 ? value4 : "");
+  settings_bar = bar_percent;
+  const int d = settings_pending;
+  settings_pending = 0;
+  return d;
 }
 
 namespace sim {
@@ -173,6 +188,7 @@ void reset() {
   memset(down_now, 0, sizeof down_now);
   memset(down_prev, 0, sizeof down_prev);
   now_us = 1000;
+  read_tick = 0;
   scroll_page = 0;
   transport_state = TRANSPORT_STOPPED_AT_ZERO;
   qn_period_us = 60000000 / 120;
@@ -189,6 +205,10 @@ void release(int x, int y) {
 void release_all() { memset(finger, 0, sizeof finger); }
 void set_num_pages(int n) { num_pages = n < 1 ? 1 : n > SIM_PAGES ? SIM_PAGES : n; }
 int saveload_calls() { return saveloads; }
+const char *settings_name_shown() { return settings_name; }
+const char *settings_value_shown() { return settings_value; }
+int settings_bar_shown() { return settings_bar; }
+void settings_touch(int delta) { settings_pending = delta; }
 // called by the driver once per UI frame, before on_ui: the edges the panel sees
 void ui_frame_edges() {
   memcpy(down_prev, down_now, sizeof down_now);
@@ -201,6 +221,7 @@ void ui_frame_edges() {
 }
 void set_scroll_page(int page) { scroll_page = page; }
 void advance_us(uint32_t us) { now_us += us; }
+void set_read_tick_us(uint32_t us) { read_tick = us; }
 uint32_t led(int x, int y) { return get_led(x, y + (scroll_page > 0 ? scroll_page : 0) * 16); }
 #ifndef C12_WASM
 void write_ppm(const char *path, int scale) {

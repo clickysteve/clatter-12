@@ -10,7 +10,7 @@ Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-on
   (build/c12_engine.inc from tools/amalgamate.py) and the glue (panel/clatter12.cpp).
 
 With --compact the engine block loses indentation and blank lines (it is generated and has no
-comments left), to stay under the IDE's upload size limit (about 200 KB was reported by another
+comments left) and the glue its comments as well, to stay under the IDE's upload size limit (about 200 KB was reported by another
 panel author; Plinky's developers describe the limit as adjustable).
 """
 import argparse, os, re, subprocess
@@ -50,15 +50,43 @@ PRELUDE = """
 #if C12_LXR_IN_RAM && !defined(WASM) && !defined(EMU)
 // The LXR's per-sample code (the firmware's IN_ITCM_RAM functions) in SRAM, through the same
 // section family PLINKY_DSP_RAM_FUNC uses. Off by default: the RAM code region is small. Each
-// function gets a section of its own (GCC 13 refuses inline and out-of-line functions in one).
+// function gets a section of its own (GCC 13 refuses inline and out-of-line functions in one), and
+// is never cloned (-O3's clones of a function would share its section, which GCC also refuses).
 #define C12_STR2_(x) #x
 #define C12_STR_(x) C12_STR2_(x)
-#define C12_LXR_CODE __attribute__((noinline, section(".time_critical.c12lxr." C12_STR_(__COUNTER__))))
+#define C12_LXR_CODE __attribute__((noinline, noclone, section(".time_critical.c12lxr." C12_STR_(__COUNTER__))))
 #else
 #define C12_LXR_CODE
 #endif
 #define C12_LXR_DATA
+// The engine's working memory (39 KB) is a member of the panel object, in Plinky's 128 KB panel
+// arena, not static SRAM (tools/amalgamate.py, RELOCATE).
+#define C12_ENGINE_RAM_EXTERNAL 1
 """
+
+
+def strip_comments(text):
+    """C++ comments out, string and character literals untouched (the glue has no raw strings)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            out.append(" ")
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def compact(text):
@@ -90,12 +118,17 @@ def main():
                            capture_output=True, text=True).stdout.strip()
     if dirty:
         commit += "+modified"
-    config = "LXR code in %s, %s" % ("SRAM" if a.in_ram else "flash", "compact" if a.compact else "full")
+    tables = "static SRAM" if re.search(r"C12_TABLES_IN_PSRAM\s+0", a.extra) else "PSRAM"
+    config = "LXR tables in %s, LXR code in %s, %s" % (tables, "SRAM" if a.in_ram else "flash",
+                                                       "compact" if a.compact else "full")
 
     engine = open(a.engine).read()
     if a.compact:
         engine = compact(engine)
     glue = open(a.glue).read()
+    if a.compact:
+        # the glue's comments are for reading the source (panel/clatter12.cpp, and _full.cpp)
+        glue = compact(strip_comments(glue))
     extra = "".join("#define %s\n" % d.strip() for d in a.extra.split(",") if d.strip())
 
     with open(a.out, "w") as f:

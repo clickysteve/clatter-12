@@ -1059,6 +1059,132 @@ int main() {
     CHECK(memcmp(pat(), &v2, sizeof v2) == 0, "saved as version 2 and loaded: the same steps");
   }
 
+  // ================================================================ diagnostics (settings pages)
+  {
+    CHECK(P->get_num_panel_settings_pages() == 7, "seven diagnostic settings pages above SEQ");
+    only_kick(2);
+    if (!is_transport_playing()) start_transport();
+    // the emulator's case: the clock does not move within a block
+    sim::set_scroll_page(-1);
+    run_ms(600);
+    CHECK(!strcmp(sim::settings_name_shown(), "DSP") && !strcmp(sim::settings_value_shown(), "n/a"),
+          "DSP page: n/a when time does not move within a callback (Plinky's emulator)");
+    // a clock that moves 40 us at each reading: on_dsp's own two readings, the engine's per stage
+    sim::set_read_tick_us(40);
+    sim::set_scroll_page(-2);
+    sim::settings_touch(1);
+    run_ms(8); // PEAK touched: everything reset
+    run_ms(600);
+    sim::set_scroll_page(-1);
+    run_ms(8);
+    const int dsp = atoi(sim::settings_value_shown());
+    CHECK(dsp > 0 && dsp < 100 && strchr(sim::settings_value_shown(), '%'), "DSP page: a load in %% once time moves");
+    const uint32_t blk = (uint32_t)(BLOCK_SIZE * 1000000u / SAMPLE_FREQ);
+    CHECK(c12glue::g_diag.max_us > 0 && c12glue::g_diag.max_us < blk && c12glue::g_diag.over == 0,
+          "peak recorded, no callback over the deadline");
+    sim::set_scroll_page(-2);
+    run_ms(8);
+    CHECK(!strcmp(sim::settings_name_shown(), "PEAK") && atoi(sim::settings_value_shown()) >= dsp, "PEAK page: at least the average");
+    // overruns: every clock reading 900 us (a callback cannot finish inside its block)
+    sim::set_read_tick_us(900);
+    run_ms(40);
+    sim::set_read_tick_us(40);
+    sim::set_scroll_page(-3);
+    run_ms(8);
+    CHECK(c12glue::g_diag.over > 0 && atoi(sim::settings_value_shown()) > 0, "OVER page counts callbacks over the deadline");
+    // late callbacks: a 5 ms gap between two blocks (the clock still between readings again, so
+    // callbacks start exactly a block apart otherwise)
+    sim::set_read_tick_us(0);
+    run_ms(8);
+    const uint32_t late0 = c12glue::g_diag.late;
+    audio_block();
+    sim::advance_us(5000);
+    audio_block();
+    CHECK(c12glue::g_diag.late == late0 + 1 && c12glue::g_diag.max_gap_us >= 5000, "a callback 2.5 blocks late is counted");
+    sim::set_scroll_page(-4);
+    run_ms(8);
+    CHECK(!strcmp(sim::settings_name_shown(), "LATE") && atoi(sim::settings_value_shown()) >= 1, "LATE page shows it");
+    // reset from the PEAK page
+    sim::set_scroll_page(-2);
+    sim::settings_touch(-1);
+    run_ms(8);
+    CHECK(c12glue::g_diag.over == 0 && c12glue::g_diag.late == 0 && c12glue::g_diag.max_gap_us <= blk,
+          "touching PEAK resets the peaks and counts");
+    sim::set_scroll_page(-5);
+    run_ms(8);
+    CHECK(!strcmp(sim::settings_name_shown(), "SPRD") && atoi(sim::settings_value_shown()) >= 12, "SPRD: the stages one callback ran (12 a block)");
+    sim::set_scroll_page(-6);
+    run_ms(100);
+    CHECK(!strcmp(sim::settings_name_shown(), "VOX") && sim::settings_value_shown()[0] >= '1', "VOX: voices sounding");
+    sim::set_scroll_page(-7);
+    run_ms(8);
+    char kb[16];
+    snprintf(kb, sizeof kb, "%dK", (int)((sizeof(clatter12) + 1023) / 1024));
+    CHECK(!strcmp(sim::settings_name_shown(), "MEM") && !strcmp(sim::settings_value_shown(), kb), "MEM: the panel object's size, memory all bound");
+    CHECK(sizeof(clatter12) <= 128 * 1024 && sizeof(c12::c12_engine_ram) == c12::c12_engine_ram_bytes(),
+          "the panel object (with the engine's memory) fits the 128 KB arena");
+    sim::set_read_tick_us(0);
+    sim::set_scroll_page(0);
+    run_ms(8);
+  }
+
+  // ================================================================ a load holds the engine
+  {
+    only_kick(1);
+    if (!is_transport_playing()) start_transport();
+    run_ms(200);
+    save();
+    // Plinky's sequence, with core 1's callbacks between the steps as on the device
+    alignas(16) static unsigned char st_mem[sizeof(clatter12)];
+    memset(st_mem, 0, sizeof st_mem);
+    clatter12 *st = new (st_mem) clatter12();
+    P->on_prepare_staged_load(st, sizeof st_mem); // asks core 1 to hold (no core 1 here: it times out, then copies)
+    CHECK(c12glue::g_hold_req == 1, "prepare asks core 1 to hold the engine");
+    const size_t at = session.size();
+    audio_block(); // core 1 answers: one block, faded out
+    CHECK(c12glue::g_hold_ack == 1, "core 1 answers after one block");
+    int tail = 0;
+    for (int i = 0; i < 8; i++) tail = maxi(tail, abs(session[at + BLOCK_SIZE * 2 - 2 + (i & 1)]));
+    CHECK(tail < 600, "that block fades to silence");
+    static uint8_t ram_before[sizeof(c12::c12_engine_ram)];
+    memcpy(ram_before, &P->engine_ram, sizeof ram_before);
+    const uint32_t held0 = c12glue::g_diag.held;
+    for (int i = 0; i < 20; i++) audio_block();
+    bool silent = true;
+    for (size_t i = at + BLOCK_SIZE * 2; i < session.size(); i++) silent = silent && session[i] == 0;
+    CHECK(silent && c12glue::g_diag.held == held0 + 20, "held: silence, and counted");
+    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "held: core 1 leaves the engine's memory untouched");
+    ui_frame(); // core 0 leaves the engine alone too while the load is pending
+    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "held: so does on_ui");
+    // the copy prepare made is now taken again, read and written back (Plinky's commit)
+    memset(st_mem, 0, sizeof st_mem);
+    st = new (st_mem) clatter12();
+    P->on_prepare_staged_load(st, sizeof st_mem); // already held: answered at once
+    serialiser_t rs(true, save_text, sizeof save_text, save_len);
+    st->on_serialise(rs, st->get_version());
+    memcpy((void *)P, (const void *)st, sizeof(clatter12));
+    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "the commit writes back the engine exactly as it was held");
+    P->on_load_finished();
+    const size_t at2 = session.size();
+    audio_block();
+    CHECK(c12glue::g_hold_req == 0 && c12glue::g_hold_ack == 0, "released: core 1 runs the engine again");
+    CHECK(abs(session[at2]) < 600, "the first block after fades in");
+    run_ms(400);
+    CHECK(rms_since(at2) > 50, "and it plays on");
+    // a hold no load ever finishes is let go
+    memset(st_mem, 0, sizeof st_mem);
+    st = new (st_mem) clatter12();
+    P->on_prepare_staged_load(st, sizeof st_mem);
+    run_ms(40);
+    CHECK(c12glue::g_hold_req == 1, "still held while the load may be under way");
+    sim::advance_us(c12glue::HOLD_TIMEOUT_US);
+    run_ms(40);
+    CHECK(c12glue::g_hold_req == 0, "let go after the timeout");
+    const size_t at3 = session.size();
+    run_ms(400);
+    CHECK(rms_since(at3) > 50, "and the engine plays again");
+  }
+
   // ================================================================ audio health over the session
   c12::c12_engine_stats st;
   c12::c12_engine_stats_read(&st);

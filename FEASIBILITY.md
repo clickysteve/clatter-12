@@ -123,11 +123,10 @@ sizes. See TESTING.md. None of this is hardware verification.
 ## 5. Principal obstacles (ranked)
 
 1. **Core-1 CPU.** Unmeasured; see §3. Mitigations prepared, decision needs one device run.
-2. **SRAM for the LXR's tables.** The default build needs ~130 KB of static SRAM (102 KB tables)
-   outside the 128 KB panel arena; whether the firmware has it is undocumented. `clatter_12_psram.cpp`
-   needs 33 KB and puts the tables in PSRAM (cost: XIP-cache misses on oscillator reads). A third
-   option, the tables inside the panel arena (the object is 2.7 KB), needs a custom staged-load
-   commit and is on the roadmap.
+2. **Static SRAM.** *Resolved in 0.0.5* (docs/HARDWARE_AUDIT.md §2): Plinky's published firmware
+   images leave a panel about 20 KB of static SRAM, so neither 0.0.4 layout (140 KB, or 40 KB with
+   the tables in PSRAM) could have linked. The tables are now in PSRAM and the engine's working
+   memory in the panel object: 1.7 KB of static SRAM. PSRAM table speed remains a device question.
 3. **Source size.** The generated panel is ~306 KB. Another panel author reports the flash endpoint
    rejecting uploads over ~200 KB; Plinky's developer describes the limit as arbitrary and raisable.
    Ask Plinky first; otherwise shrink (identifier compaction, dropping unused LXR code paths).

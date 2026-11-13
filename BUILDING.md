@@ -30,7 +30,7 @@ make
 |---|---|
 | `make panel` | `build/clatter_12.cpp` and its variants (below) |
 | `make test` | every host test (TESTING.md) |
-| `make m33` | Cortex-M33 compile of each variant, section sizes. `ARM_GXX=/path/to/arm-none-eabi-g++` if not on PATH |
+| `make m33` | the hardware build check (`tools/hw_check.py`): each variant compiled for the Cortex-M33 at `-O3`, `-O2` and `-Os` with `-Wall -Wextra -Werror`, a garbage-collected panel-only link, static SRAM against the budget, the panel object against 128 KB, the deepest stack chains; report in `build/hw_check.txt`. `ARM_GXX=/path/to/arm-none-eabi-g++` if not on PATH |
 | `make m33-bench` | instructions per output block on a Cortex-M33, counted by QEMU (needs `qemu-system-arm`, `arm-none-eabi-gcc` with newlib). An estimate, see TESTING.md "CPU". `M33_BENCH_OPT=-Os` (after `rm build/m33_bench.elf`) for other flags |
 | `make m33-profile` | the same, stage by stage: the event head, each LXR voice, the mix stages, the converter |
 | `make golden` | `build/golden/*.raw`: four fixed 24 s sessions as raw PCM (`tests/golden.c`) |
@@ -38,18 +38,22 @@ make
 | `make bench` | host timing (not predictive of the RP2350) |
 | `make pocket-test` | CLATTER Pocket's own tests, unchanged |
 | `sh tools/fetch-plinky-headers.sh` | the published Plinky API bundle into `build/`, sha256-pinned |
+| `python3 tools/firmware_ram.py IMAGE.bin.lzma` | static SRAM a Plinky firmware image leaves a panel (images: `plinkysynth/community-panels-built`) |
 
 ## Panel variants
 
-| File | LXR tables (102 KB) | LXR per-sample code | Try it when |
+| File | LXR tables (100 KB) | LXR per-sample code | Try it when |
 |---|---|---|---|
-| `clatter_12.cpp` | static SRAM | flash (XIP) | first |
-| `clatter_12_psram.cpp` | PSRAM | flash | the firmware will not link the 138 KB of static data |
-| `clatter_12_sram.cpp` | static SRAM | SRAM (`.time_critical`) | it links but the DSP page shows too much load |
-| `clatter_12_full.cpp` | static SRAM | flash | reading; the simulator uses it |
+| `clatter_12.cpp` | PSRAM | flash (XIP) | first |
+| `clatter_12_cycles.cpp` | PSRAM | flash | to read the core's cycle counter and clock in the log (it enables a debug register; HARDWARE_TESTING.md stage 8b) |
+| `clatter_12_sram.cpp` | PSRAM | SRAM (`.time_critical`, 15 KB) | only if Plinky confirms static SRAM to spare: 17 KB of static SRAM against a budget of about 18 KB |
+| `clatter_12_full.cpp` | PSRAM | flash | reading (comments kept); the simulator and the web page use it |
 
-In every variant the delay's lines (256 KB) are in PSRAM, 128 KB in, and the reverb's (26 KB) in the
-panel object. All are generated: edit `core/`, `panel/` or the tools, never `build/`. Each file's header records
+In every variant the engine's working memory (39 KB) and the reverb's lines (26 KB) are in the panel
+object, the delay's lines (256 KB) and the undo history (33 KB) in PSRAM, and static SRAM is 1.7 KB:
+Plinky's firmware leaves a panel about 20 KB (ARCHITECTURE.md "Memory"). Tables in static SRAM, as
+0.0.4 had them, cannot link (`--extra "C12_TABLES_IN_PSRAM 0"` still builds it, for comparison).
+All are generated: edit `core/`, `panel/` or the tools, never `build/`. Each file's header records
 the CLATTER 12 commit and configuration it came from (`+modified` if built from uncommitted work).
 
 ## Installing (not yet done by anyone)
@@ -61,7 +65,7 @@ There is no command-line install: Plinky panels go through Plinky's IDE.
 
 1. Open the Plinky 12 Custom Panels code editor (closed beta; access via Plinky's Discord,
    [plinky12.com/codeed.html](https://plinky12.com/codeed.html)).
-2. New tab, paste `build/clatter_12.cpp`, press **Test** to run it in Plinky's in-browser emulator.
+2. New tab, paste `build/clatter_12.cpp` (473 KB), press **Test** to run it in Plinky's in-browser emulator.
    Expect a red top-left pad if bring-up failed, otherwise the default beat; PLAY is bottom right.
 3. Only then **Flash** to a Plinky 12 over WebUSB, which re-flashes the panel set using Plinky's own
    installer. Stock panels stay; Plinky's [firmware page](https://plinky12.com/firmware.html) restores

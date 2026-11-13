@@ -155,20 +155,47 @@ in the same pass as the window: 24 300 instructions per output block with the ou
 
 ## Memory
 
-| | Size (GCC 13, Cortex-M33, engine and panel) | Where |
-|---|---|---|
-| code | 120 KB (`clatter_12_sram.cpp`: 98 KB flash + 15 KB SRAM) | flash / `.time_critical` SRAM |
-| constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
-| LXR tables, unpacked | 100 KB | static SRAM, or PSRAM (`C12_TABLES_IN_PSRAM`) |
-| other static state (voices, event ring, patterns, converter (12 KB), mix and send buffers, strokes, the trigger log) | 40 KB | static SRAM |
-| delay lines | 256 KB | PSRAM (bound at run time; none: silent) |
-| reverb lines | 26 KB | the panel object (the last member, kept out of a staged load's copy, so a load leaves them silent) |
-| panel object (UI state, the kit, 16 undo snapshots, the project, two alternative patterns, scenes, the reverb's lines) | 72.1 KB | Plinky's 128 KB panel arena |
-| source file | 483 KB (`--compact`) | the IDE |
+Plinky's firmware leaves a panel very little static SRAM. Firmware 90bd, as Plinky's own pipeline built
+it with Grid and a panel without static data, ends `.bss` 20 292 bytes before the end of main SRAM,
+and the pico-sdk's heap (2 KB by default) comes out of that (`tools/firmware_ram.py` reads it from the
+published images; Ambiotica, a heavy community panel, leaves 2 808 bytes). So everything CLATTER 12
+needs beyond a few hundred bytes lives in the panel object (Plinky's 128 KB arena) or PSRAM.
 
-Nothing large is on the stack in CLATTER 12's code (mix buffers are static; the LXR FX's own stack
-buffers are kept to 128 bytes by running them 32 frames at a time). No allocation anywhere. The
-undo history lives in the panel object, where there is room, not in static SRAM, where there may not be.
+| | Size (GCC 13 `-O3`, Cortex-M33, engine and panel, gc-linked: `make m33`) | Where |
+|---|---|---|
+| code | 144 KB at `-O3` (108 KB at `-O2`, 73 KB at `-Os`; `clatter_12_sram.cpp`: 15 KB of it in SRAM) | flash / `.time_critical` SRAM |
+| constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
+| LXR tables, unpacked | 100 KB | PSRAM, from its start (`C12_TABLES_IN_PSRAM 1`, the default) |
+| static state left in static SRAM (sequencer and performance counters, profile, diagnostics) | 1.7 KB | static SRAM |
+| the engine's working memory (LXR voices and parameters, event ring, patterns, converter 12 KB, mix and send buffers, strokes, trigger log) | 39 KB | the panel object (`engine_ram`, `c12_engine_ram_bind`) |
+| delay lines | 256 KB | PSRAM, 128 KB in (bound at run time; none: silent) |
+| undo history (16 snapshots) | 33 KB | PSRAM, 384 KB in (none: no undo) |
+| reverb lines | 26 KB | the panel object (the last member, kept out of a staged load's copy, so a load leaves them silent) |
+| panel object (UI state, the kit, the project, two alternative patterns, scenes, the engine's memory, the reverb's lines) | 75.2 KB | Plinky's 128 KB panel arena (a `static_assert` stops a build that does not fit) |
+| stack | deepest chain 760 B from `on_dsp` (core 1), 664 B from `on_ui` (core 0), GCC's call graph | the cores' stacks |
+| source file | 473 KB (`--compact`: engine compacted, glue without comments) | the IDE |
+
+**How the engine's memory moved** (`tools/amalgamate.py`, `RELOCATE`). The LXR's, Pocket's and CLATTER
+12's zero-initialised file-scope objects are listed by name. For each, a macro defined before its first
+appearance makes every declaration a declaration of a pointer and every use a use through it
+(`static struct event ring[256];` becomes `static struct event (*c12r_ring)[256];`, `ring[i]` becomes
+`(*c12r_ring)[i]`); scalars get their pointer written into the text. Types, sizes (`sizeof`) and
+values are unchanged, and the audio is bit-identical to before (`tools/compare_builds.sh`). The
+storage is one generated struct, `c12_engine_ram`, that the panel holds; the host builds bind a
+static one. A declaration with an initialiser, or a second declaration of the same name anywhere
+(a parameter, a local, a member), fails the tool, by a compile and a `-Wshadow` check of the text.
+Cost: about 0.3 % more instructions per block (QEMU), one pointer load per function.
+
+**Project loads.** Plinky loads a project by constructing a staged copy of the panel, asking the live
+panel to prepare it (`on_prepare_staged_load`), reading the file into it, and then copying it over the
+live object from the audio thread. With the engine's memory in the object, core 1 must not be
+changing it while the copy is taken, or the copy written back would be torn: `on_prepare_staged_load`
+holds the engine (core 1 renders one block faded out, then outputs silence and touches nothing),
+copies, and the hold ends when the load is applied, when Plinky calls `on_load_finished`, or after
+10 s. What is written back is then exactly the held engine. The first block after fades in.
+
+No allocation anywhere. The LXR FX's own stack buffers are kept to 128 bytes by running them 32
+frames at a time.
 
 ## The amalgamation (`tools/amalgamate.py`)
 

@@ -1,148 +1,131 @@
 # Hardware testing
 
-CLATTER 12 has **never run on a Plinky 12**. Nothing in this repository has been flashed, and nothing
-here flashes anything. This is the plan for the first test: the emulator first, then a device, in
-stages, stopping at the first sign of trouble. Every figure below that is not marked *measured on
-the device* comes from the host, the simulator or QEMU, and is an estimate.
+CLATTER 12 has **never run on a Plinky 12**. Nothing here flashes anything. This is the procedure for
+the first device test: emulator first, then the device in stages, stopping at the first sign of
+trouble. Figures not marked *measured on the device* are estimates (host, simulator, QEMU). What is
+known and what is not: [docs/HARDWARE_AUDIT.md](docs/HARDWARE_AUDIT.md).
 
-## What you need
+## Before you start
 
 | | |
 |---|---|
-| Plinky 12 firmware | the current release from Plinky (no particular build is required by anything CLATTER 12 uses that we know of). **Write down the firmware build code the IDE shows** before you start: it goes in the report |
-| Panel source | `build/clatter_12.cpp` from `make` (483 KB). The variants are below |
-| Plinky 12 IDE | [plinky12.com/codeed.html](https://plinky12.com/codeed.html) (closed beta, access via Plinky's Discord), Chrome or Edge for WebUSB |
-| A computer with an SD card reader | for the backup |
-| Headphones or monitors at **low volume** | a fault can be a full-scale burst |
+| Firmware | the current Plinky release. **Write down the firmware build code** the IDE shows |
+| Panel source | `build/clatter_12.cpp` from `make` (473 KB). Optional: `clatter_12_cycles.cpp` (stage 8b) |
+| IDE | [plinky12.com/codeed.html](https://plinky12.com/codeed.html) (closed beta), Chrome or Edge (WebUSB). Use plinky12.com, not the staging IDE: its device log does not work |
+| Listening | headphones or monitors at **low volume**: a fault can be a full-scale burst |
+| Backup | eject the SD card and copy all of it to a computer; note which panels are installed |
+| Recovery | Plinky's [firmware page](https://plinky12.com/firmware.html) restores stock firmware and panels. The RP2350's boot ROM is mask ROM: a bad panel cannot remove the means of reflashing. **Find Plinky's instructions for entering update mode on your unit before you start** |
 
-## Installation, backup and recovery
+CLATTER 12 has no installer, never touches the bootloader, and writes only its own save slots.
 
-- **Installation** is only through Plinky's IDE: paste the file into a new tab, **Test** (emulator),
-  then **Flash** (WebUSB). The IDE re-flashes the panel set with Plinky's own installer. CLATTER 12 has
-  no installer and never touches the bootloader.
-- **Backup first.** Eject the SD card and copy all of it to the computer (projects, saves, presets).
-  Note which panels are installed. CLATTER 12 writes only its own save slots, but a crash during a save
-  could leave a damaged file.
-- **Recovery.** Plinky's [firmware page](https://plinky12.com/firmware.html) restores stock firmware
-  and panels. The RP2350's boot ROM is in mask ROM, so a bad panel cannot remove the means of
-  reinstalling firmware; check Plinky's own instructions for entering the update mode on your unit
-  *before* you start, so you are not looking for them with a stuck device.
-- To go back to stock panels without a full restore, flash the stock panel set from the IDE.
+## What it needs (from `make m33`: GCC 13 `-O3`, a panel-only link; not linked with Plinky's firmware)
 
-## Memory it needs (from the Cortex-M33 compile, GCC 13, `-O2`; not linked against Plinky's firmware)
+| | |
+|---|---|
+| static SRAM | **1.7 KB**. Firmware 90bd leaves about 20 KB for a panel (less the heap); 0.0.4 needed 140 KB and could not have linked |
+| panel object | 75.2 KB of Plinky's 128 KB arena (the engine's 39 KB of working memory and the reverb's 26 KB included) |
+| PSRAM | 100 KB LXR tables (from 0), 256 KB delay (from 128 KB), 33 KB undo (from 384 KB) |
+| flash | 144 KB code + 27 KB constants at `-O3` |
 
-| | `clatter_12.cpp` | `clatter_12_psram.cpp` |
+## Stop conditions (any stage)
+
+Stop, note what happened and the stage, and unplug USB at once on any of:
+
+- crash, freeze, reboot, LEDs frozen or garbage, the grid not responding;
+- loud noise, a full-scale burst, an unexpected continuous tone, or DC (a speaker cone held out);
+- crackles or dropouts that recur (more than one isolated click), or the **LATE** or **OVER** count rising;
+- **DSP** above 85 % or **PEAK** above 95 %;
+- anything like memory corruption: patterns or kits changing by themselves, other panels' settings or
+  saves changed, the save page listing nonsense;
+- a flash failing part way, or the Plinky not coming back after one; heat, smell, USB dropping out.
+
+Do not retry on the device until the cause is understood. Restore stock firmware if it behaves oddly.
+
+## Reading the diagnostics
+
+Right side button **up** from SEQ scrolls through seven settings pages (Plinky's own style). None
+costs a musical page. The audio core's figures are this panel's `on_dsp` only, timed with the
+RP2350's hardware microsecond timer; Plinky's own mix and FX run after it on the same core and are
+not included, so treat 85 % as the limit, not 100 %.
+
+| Page | Shows | Healthy |
 |---|---|---|
-| flash code + constants | 120 KB + 27 KB | 120 KB + 27 KB |
-| static SRAM (outside the panel arena) | **140 KB** (40 KB + the LXR's 100 KB of tables) | 40 KB |
-| panel object (Plinky's 128 KB arena) | 72 KB (of which 26 KB the reverb's lines) | 72 KB |
-| PSRAM | 256 KB (the delay's lines, from 128 KB in) | 128 KB tables + 256 KB delay |
-| stack | small: nothing large on it in CLATTER 12's code; the LXR FX run 32 frames at a time to keep their buffers at 128 bytes | |
+| **DSP** | average load over the last half second (% of the 2000 us block) | under 70 %: green; 70-85 %: amber; over 85 %: stop |
+| **PEAK** | the longest callback since reset. **Touch the value to reset every peak and count** | under 85 % |
+| **OVER** | callbacks whose own work outlasted the block; the bar: how often one passed 85 % lately | 0 |
+| **LATE** | callbacks that started over 1.25 blocks after the previous one (the nearest a panel can see to an output underrun; the firmware does not expose its own), plus the converter's underruns | 0 |
+| **SPRD** | the most LXR stages one callback ran lately (DSP spreading: 12 = one LXR block; 24 = two) | about 12-19 |
+| **VOX** | voices sounding now, then the effects running: D delay, R reverb, C colour (drive, ring, compressor), P sends to Plinky's effects | as expected |
+| **MEM** | the panel object's size; `ERR` if the delay, undo or tables found no memory | `75K`, never `ERR` |
 
-Whether Plinky's firmware has 140 KB of static SRAM free for one panel is **unknown**: that is the
-first link risk, and the reason the `_psram` variant exists.
+**Connect for logging** in the IDE prints every 2 s:
+`c12 dsp avg A max M us of 2000 (peak P since reset); over O near N late L gap G us; lxr .. mix .. rs .. us; stages max S; ...; clip C limited .. under U`.
+In Plinky's emulator the clock does not move inside a callback: DSP and PEAK read `n/a`.
 
-## Known limitations and risks
+**Signs of audio deadline failure**: OVER or LATE above 0; PEAK near or over 100 %; `gap` well over
+2000 us in the log; crackle that follows load (more tracks, delay and reverb, the compressor) rather
+than particular sounds. If DSP is under 70 % yet LATE rises, Plinky's own chain or another task is
+the cause: report it, with the log.
 
-- **CPU.** QEMU counts instructions, not cycles. With the delay and reverb on, playing all seven tracks,
-  the busiest block is about 218 000 instructions (73 % of a 150 MHz core 1 at one cycle each) and the
-  average 195 000 (65 %); the worst case tried, 252 000 (84 %). Real cycles are higher (flash and PSRAM
-  waits, multi-cycle loads, branches): a factor of 1.2 to 1.6 would put the busiest blocks near or over
-  budget. Unknown: Plinky's real core-1 clock, how much its own output chain costs after `on_dsp`
-  (the panel returns `false`, so Plinky's standard mix and FX run after it on the same core; the DSP
-  page does not include them), and the compiler flags Plinky's server uses (`-Os` would need about 20 %
-  more instructions than the figures here).
-- **PSRAM.** The delay's 256 KB are in PSRAM, read and written as one sequential stream; other panels
-  report scattered PSRAM access as their main cost, which is why the reverb's lines are now in SRAM.
-  Never measured.
-- **Source size.** 483 KB. Plinky's IDE **Test** has been shown to take 306 KB; another panel author
-  reports a ~200 KB limit for **Flash**. Plinky describe the limit as adjustable. If the IDE refuses
-  the file, stop and ask Plinky; lossless compaction cannot get under 200 KB (TESTING.md).
-- **Eight pages** (seven and Plinky's save page). The published panels use two to five; Plinky
-  publishes no maximum. The simulator allows eight.
-- **Loads clear the reverb.** Loading a project replaces the panel object, and with it the reverb's
-  lines: the reverb tail stops at the load (by design, rather than replaying an older tail).
-- **Emulator timing.** `time_us()` does not advance within an audio block there, so the DSP page
-  reads `n/a`: the emulator says nothing about CPU.
+## Stages
 
-## Stop conditions
+Record for each: pass or fail; DSP, PEAK, OVER, LATE (reset PEAK at the start of each stage); the
+log line; what you heard.
 
-Stop the test, note what happened, and power the Plinky off (pull USB) at once if you see any of:
+**0. Emulator.** Paste `build/clatter_12.cpp` in a new tab, **Test**. No red pad at top left (red:
+bring-up failed; see the log). PLAY (bottom right) plays a two-bar beat. Note compiler warnings or
+errors. If the IDE refuses the size, stop (it accepted 483 KB for Flash before).
 
-- a crash, freeze, reboot or watchdog reset; LEDs frozen or garbage; the grid no longer responding;
-- loud noise, a full-scale burst, a continuous tone that should not be there, or DC (a speaker cone held out);
-- crackling, dropouts or gaps that come back (more than one isolated click), or the log's `under`
-  count rising;
-- the DSP page's average above 85 % or its maximum above 95 %;
-- anything that looks like memory corruption: a pattern or kit changing on its own, other panels'
-  settings or saves changed, corrupted save files, the save page listing nonsense;
-- the IDE failing to flash part way, or the Plinky not coming back after a flash;
-- anything else unexpected from the hardware (heat, smell, USB disconnecting repeatedly).
+**1. Install and first boot.** **Flash**. If the build fails, copy the whole error and stop: a link
+error naming RAM ("region RAM overflowed") means the static SRAM estimate is wrong. The panel appears
+in Plinky's list and opens on SEQ; the log shows `clatter12: engine up, out rate 32000 Hz`. Nothing
+plays until PLAY. Settings pages: **MEM** shows `75K`, not `ERR`. Idle **DSP**: note it.
 
-Do not try again on the device before the cause is understood. Restore stock firmware if the device
-behaves oddly after a stop.
+**2. Navigation.** Row 15's first eight pads jump to SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT, SAVE;
+the right side buttons scroll the same, and above SEQ the seven diagnostic pages. Every page lights.
 
-## Staged first test
+**3. Single voice.** Stopped: tap DRUM 1's audition pad (SEQ row 13, x8) softly, then hard: a clean
+kick, louder when harder, no click at the end. Then each of the seven audition pads in turn.
 
-Record for each stage: pass or fail, the DSP page's average and maximum, the log line
-(`c12 dsp avg … max … us (lxr … mix … rs …); … clip … limited … under …`), and what you heard.
+**4. Seven-track playback.** Put a step on every track in the same column, PLAY: all seven together, no
+crackle. Then GEN a pattern and let it play a minute. Note DSP and PEAK.
 
-**0. Emulator (no device).** Paste `build/clatter_12.cpp`, press **Test**. Expect a 2-bar default
-beat after pressing PLAY (bottom right) and no red pad at top left (red: bring-up failed, see the
-log). Go through every stage below that does not need sound quality or timing. Note warnings and
-errors from the compiler. If the IDE refuses the file's size, stop (see "Source size").
+**5. Delay and reverb stress.** MIX: raise the delay and reverb sends of every track (rows 12-13). FX,
+SPACE: delay feedback high, reverb decay long. All seven tracks dense (GEN, density up). Two minutes.
+Freeze each; let the tails die. **Note DSP and PEAK with both effects running and all seven tracks:
+the figure this build was optimised for** (QEMU: about 64 % average, 71 % busiest at one instruction
+a cycle; real cycles are higher). Then FX ENGINE PLINKY (x11 row 0) and back.
 
-**1. Boot and panel loading.** Flash. The panel appears in Plinky's panel list and opens on SEQ; the
-log shows `clatter12: engine up, out rate 32000 Hz`. Nothing plays until PLAY. *Stop* on a red pad,
-a reboot loop, or a link error in the IDE (then try `clatter_12_psram.cpp`, and report the error).
+**6. Full LXR effects.** FX, COLOUR: route every track (row 0), drive wet up (row 1), ring modulator wet
+(row 6), compressor wet (row 8), bits (row 14), with stage 5's delay and reverb still on. The heaviest
+DSP configuration (QEMU busiest block 89 %). Add 4x and 8x ratchets on several tracks, a FILL and a
+BEAT REPEAT (PERFORM, REPEAT). Five minutes. Pass: OVER and LATE 0, PEAK under 95 %. If it fails only
+here, note which addition started it.
 
-**2. Basic navigation.** Row 15's first eight pads jump to SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT,
-SAVE; the right-hand side buttons scroll through the same eight and up to the DSP page. Every page
-lights. Touches on one page do nothing on the others.
+**7. Tempo and transport.** Tap TEMPO four times; hold it for the overlay, +1/-10, half, double.
+Change tempo quickly for ten seconds while playing: LATE stays 0.
 
-**3. One voice.** Stopped: tap DRUM 1's audition pad (SEQ, row 13, the first of the seven PLAY pads
-from x8; pressure is velocity) a few times, soft and hard. A clean kick,
-louder when pressed harder; no clicks at the end of the decay. DSP page: note the idle load.
+**8. Diagnostics.** Touch PEAK's value: PEAK, OVER and LATE return to 0. Optional **8b**: flash
+`clatter_12_cycles.cpp` (it enables the core's cycle counter, a debug register a debugger also
+uses) and repeat stage 5: the log adds `cycles .. max .. (N MHz)`, the real core clock and cycles per
+block, which turn QEMU's instruction counts into a real estimate. Then flash `clatter_12.cpp` again.
 
-**4. Seven voices.** Audition each of the seven tracks in turn. Then program a step on every track in
-the same column and press PLAY: all seven sound together, no crackle. Note the DSP average and maximum.
+**9. Saving and reloading.** Program a pattern, set levels and a kit, SAVE page: save to a slot. Change
+everything. Load the slot: the sound fades out, there is a short silence, and it fades back in with
+the saved project (the reverb tail stops at a load, by design). Load a slot saved by 0.0.4 if you
+have one: it must load. Power-cycle and load again.
 
-**5. Pattern sequencing.** Clear, then program a two-bar beat; GEN a pattern; MUT; UNDO and REDO;
-change a step's velocity and condition. Steps light in time with what you hear. Save to a slot on the
-SAVE page, change the pattern, load the slot back: the saved pattern returns (the reverb tail stops at
-the load; that is expected).
-
-**6. Tempo.** Tap TEMPO four times at a steady rate; hold TEMPO for the overlay, nudge +1/-10, half,
-double. The beat follows at once without a glitch. Change the tempo quickly for ten seconds while
-playing: no crackle, `under` stays 0.
-
-**7. Delay and reverb.** FX page, SPACE: raise the delay and reverb sends of two tracks (MIX), then of
-all tracks. Echoes in time with the tempo, a smooth reverb tail; ping-pong and mono; freeze each; turn
-the sends down and let the tails die. **Note the DSP average and maximum with both on and all seven
-tracks playing: this is the number this release was optimised for.** Then FX ENGINE PLINKY and
-back.
-
-**8. Ratchets and rolls.** Give a hat step a 4x ratchet, an 8x at 300 BPM; flam and drag a snare;
-an accelerating roll. They play evenly, no doubled or missing strokes, no crackle.
-
-**9. Performance controls.** PERFORM: hold MUTE, KILL ALL, FILL, MUTATE, DENSITY, STUTTER, THROW; LATCH
-one and release it; COMMIT. Store a scene and recall it at the bar. REPEAT: note repeat by pressure on
-a few tracks at once, a roll pad, BEAT REPEAT. Everything returns to the pattern when released.
-
-**10. Stress.** All seven tracks dense, 8x ratchets on several, delay and reverb on, the LXR drive,
-ring modulator and compressor on (FX, COLOUR), and at the same time: FILL, BEAT REPEAT, two note
-repeats, a tempo change every second, GEN and NEW KIT while playing. Run five minutes. Then the same
-with FX ENGINE PLINKY. Pass: no crackle, `under` 0, DSP maximum under 95 %. If it fails only in stage
-10, note at which addition it started.
+**10. Recovery check.** Flash the stock panel set from the IDE; confirm the stock panels work and your
+SD card's other saves are intact.
 
 ## If the load is too high
 
-In order, one change at a time, each reported with the DSP page's figures:
+One change at a time, each reported with the diagnostics and the firmware code:
 
-1. `clatter_12_sram.cpp`: the LXR's per-sample code (15 KB) in SRAM instead of flash.
-2. Fewer voices or effects playing at once, to find where the limit is (not a fix: a measurement).
-3. Report the figures with the build code and the variant; the next steps (converter in SRAM, the LXR
-   tables' placement, a voice skipped while silent) need those numbers to choose between.
+1. Report stage 5's and 6's figures and the `_cycles` log: they decide what to do next.
+2. `clatter_12_sram.cpp` (LXR per-sample code in SRAM) only if Plinky confirms RAM to spare: it adds
+   15 KB of static SRAM, near the whole budget.
+3. Fewer voices or effects at once, to find the limit (a measurement, not a fix).
 
-Never describe a build as hardware-verified on the strength of this checklist alone; record what was
-run, on which firmware, with what result.
+Never describe a build as hardware-verified from this checklist alone: record what was run, on which
+firmware, with what result.

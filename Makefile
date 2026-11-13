@@ -46,11 +46,12 @@ $(BUILD)/clatter_12_full.cpp: $(BUILD)/c12_engine.inc panel/clatter12.cpp tools/
 	$(PY) tools/make_panel.py -o $@
 $(BUILD)/clatter_12_sram.cpp: $(BUILD)/c12_engine.inc panel/clatter12.cpp tools/make_panel.py VERSION
 	$(PY) tools/make_panel.py --compact --in-ram 1 -o $@
-$(BUILD)/clatter_12_psram.cpp: $(BUILD)/c12_engine.inc panel/clatter12.cpp tools/make_panel.py VERSION
-	$(PY) tools/make_panel.py --compact --extra "C12_TABLES_IN_PSRAM 1" -o $@
-# Variants (see BUILDING.md): clatter_12 (tables in SRAM, LXR code in flash), _sram (LXR code in
-# SRAM too), _psram (tables in PSRAM), _full (not compacted; for reading and the simulator).
-panel: $(BUILD)/clatter_12.cpp $(BUILD)/clatter_12_full.cpp $(BUILD)/clatter_12_sram.cpp $(BUILD)/clatter_12_psram.cpp
+$(BUILD)/clatter_12_cycles.cpp: $(BUILD)/c12_engine.inc panel/clatter12.cpp tools/make_panel.py VERSION
+	$(PY) tools/make_panel.py --compact --extra "C12_DIAG_CYCLES 1" -o $@
+# Variants (see BUILDING.md): clatter_12 (LXR tables in PSRAM, LXR code in flash: the one to try),
+# _cycles (the same, and the core-1 cycle counter in the diagnostics), _sram (LXR code in SRAM:
+# 15 KB more static SRAM, likely too much for firmware 90bd), _full (not compacted; the simulator).
+panel: $(BUILD)/clatter_12.cpp $(BUILD)/clatter_12_full.cpp $(BUILD)/clatter_12_sram.cpp $(BUILD)/clatter_12_cycles.cpp
 
 $(BUILD)/c12_unity.o: $(BUILD)/c12_engine_c.c
 	$(CC) $(UNITY_CFLAGS) -c $< -o $@
@@ -96,19 +97,19 @@ test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD
 	$(BUILD)/test_panel_sim
 	$(PY) tools/check_api.py panel/clatter12.cpp sim/plinky_sim.h
 
-# The generated panel for the RP2350's core, with the simulator's declarations of the Plinky API
-# in front (the real IDE headers are not published as a compilable set). Proves the engine and
-# glue compile for Cortex-M33 + single-precision FPU with GCC, and gives section sizes. It does
-# not link against Plinky firmware.
-M33_VARIANTS := clatter_12 clatter_12_sram clatter_12_psram
+# The generated panel as Plinky's hardware build would see it (tools/hw_check.py): ARM GCC for the
+# RP2350's Cortex-M33, -O3 (what Plinky's own firmware image shows) and -O2 and -Os, -Wall -Wextra
+# with warnings as errors; then a garbage-collected link of the panel alone, its static SRAM against
+# the firmware's budget, the panel object against the 128 KB arena, and stack frames. The simulator's
+# declarations stand in for the Plinky API. It does not link against Plinky firmware.
+M33_VARIANTS := clatter_12 clatter_12_cycles clatter_12_sram
 m33: $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 	@test -n "$(ARM_GXX)" || (echo "arm-none-eabi-g++ not found (set ARM_GXX)"; exit 1)
+	PATH="$(dir $(ARM_GXX)):$$PATH" $(PY) tools/hw_check.py --report $(BUILD)/hw_check.txt $(foreach v,$(M33_VARIANTS),$(BUILD)/$(v).cpp)
 	@for v in $(M33_VARIANTS); do \
-		printf '#include <new>\n#include "plinky_sim.h"\n#include "%s.cpp"\n// as the firmware does: the panel object constructed in its arena (so its code is emitted and counted)\npanel_t* c12_m33_construct(void* arena) { return new (arena) clatter12(); }\n' $$v > $(BUILD)/m33_$$v.cpp; \
-		echo "$(ARM_GXX) ... $$v"; \
+		printf '#include <new>\n#include "plinky_sim.h"\n#include "%s.cpp"\npanel_t* c12_m33_construct(void* arena) { return new (arena) clatter12(); }\n' $$v > $(BUILD)/m33_$$v.cpp; \
 		$(ARM_GXX) $(M33_FLAGS) -Werror=return-type -Isim -I$(BUILD) -c $(BUILD)/m33_$$v.cpp -o $(BUILD)/m33_$$v.o || exit 1; \
 	done
-	$(PY) tools/m33_sizes.py $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 	$(PY) tools/check_link.py $(BUILD)/c12_engine.inc $(foreach v,$(M33_VARIANTS),$(BUILD)/m33_$(v).o)
 
 # The project page (docs/, GitHub Pages) runs the engine in the browser as WebAssembly: the generated

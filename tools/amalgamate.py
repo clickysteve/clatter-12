@@ -139,6 +139,29 @@ CXX_FIXES = [
     # exactly as before) in C++, and are accepted by GCC and Clang in gnu11 (and C23) for the
     # C reference build, which compiles this same text.
     (r"struct event e = \{ 0 \};", "struct event e = {};", 6),
+    # Four file-local MIDI-parser variables (ParameterArray.c's MIDI side, which CLATTER does not
+    # run) that nothing reads or writes: GCC's -Wunused-variable (in -Wall) reports each, and a
+    # build with warnings as errors would stop on them. Removed; nothing else changes.
+    (r"\nstatic uint8_t midiParser_mtcIgnore=1;", "\n", 1),
+    (r"\nstatic uint8_t midiParser_mtcIsRunning=0;", "\n", 1),
+    (r"\nstatic union \{\n uint8_t value;\n struct \{\n(?:  unsigned [a-z0-9]*:\d;\n){5} \} route;\n\} midiParser_routing = \{0\};",
+     "\n", 1),
+    (r"\nstatic uint8_t parserState = IGNORE;", "\n", 1),
+    # pocket_param_table.c keeps the eight parameter-owning objects' addresses in a constant table.
+    # With those objects in the panel's memory (RELOCATE, below) their addresses are known only once
+    # it is bound, so the table is built where it is read (once per parameter, when the parameter
+    # table is rebuilt at start-up): the same eight addresses, in the same order.
+    (r"static void\* const objects\[\] = \{([^}]*)\};",
+     r"static void* c12_param_object(unsigned i) { void* const objects[] = {\1}; return objects[i]; }", 1),
+    (r"\(uint8_t\*\)objects\[\(place->where >> 4\) - 1u\]", "(uint8_t*)c12_param_object((place->where >> 4) - 1u)", 1),
+]
+# The LXR's per-sample functions carry C12_LXR_CODE on their prototypes and their definitions. In
+# the variant that puts them in SRAM (make_panel --in-ram) it is a section attribute with a unique
+# name each time it appears (__COUNTER__), so a definition's would conflict with its prototype's
+# (GCC -Wattributes, an error with warnings as errors). Placement is the definition's business:
+# the prototypes lose it. Counted, so an upstream change is noticed.
+PROTO_FIXES = [
+    (r"\bC12_LXR_CODE ([^;{}]*\)\s*;)", r"\1", 3),
 ]
 # With packed tables the arrays are written once at start-up (lxr_tables_unpack.c), which C
 # tolerates against the firmware's `extern const` declarations and C++ does not.
@@ -280,6 +303,7 @@ def rewrite_designators(text, cc):
         exe = os.path.join(d, "eval")
         with open(src, "w") as f:
             f.write(text.replace("C12_LXR_CODE", "").replace("C12_LXR_DATA", ""))
+            f.write("\nint c12_ram_ensure(void) { return 0; } /* defined by relocate(), later */\n")
             f.write("\nint main(void) {\n")
             for e in exprs:
                 f.write('  printf("%%ld\\n", (long)(%s));\n' % e)
@@ -412,6 +436,89 @@ static inline float exp(float x) { return expf(x); }
 """
 
 
+# ---- the engine's working memory, out of static SRAM ---------------------------------------------
+# Plinky's firmware leaves a panel very little static SRAM: in the firmware images Plinky's own
+# pipeline built (firmware 90bd, community-panels-built, measured with tools/firmware_ram.py) about
+# 20 KB lies between the end of .bss and the end of main SRAM, and the heap is reserved there too.
+# A panel's mutable state belongs in its object, in the 128 KB arena the firmware sets aside for it.
+# Each name below is a zero-initialised file-scope object of the engine (the LXR's voices and
+# parameters, Pocket's event ring and patterns, CLATTER 12's mix buffers and converter): a macro
+# defined before its first appearance turns every declaration of it into a declaration of a pointer
+# (`static struct event ring[256];` becomes `static struct event (*c12r_ring)[256];`) and every use
+# into a use through that pointer (`ring[i]` is `(*c12r_ring)[i]`), so the code is unchanged in
+# meaning: same types, same sizes (`sizeof ring` is still the array's), same values. The storage is
+# one struct, struct c12_engine_ram, which the panel puts in its object (c12_engine_ram_bind) and the
+# host builds as a static (c12_ram_ensure). Safety checks: a declaration with an initialiser other
+# than zero does not compile through the pointer (C++); any other object, parameter or member of the
+# same name is either a compile error or a -Wshadow warning on c12r_*, which stops this tool.
+RELOCATE = [
+    # LXR voices and parameters
+    "voiceArray", "parameterArray", "snareVoice", "cymbalVoice", "hatVoice", "activeParameters",
+    "midiParser_originalCcValues", "fxBus", "velocityModulators", "fxDrive",
+    # CLATTER Pocket: the event ring, the pattern buffers, the voice blocks and their mix
+    "ring", "patterns", "voiceData", "mixL", "mixR", "paramShadow",
+    # CLATTER 12's engine: converter, buses, sends, strokes, kit streaming
+    "resampler", "sendRing", "trigLog", "sendOut", "outF", "lxrF", "strk", "grace", "probs",
+    "kitTarget", "kitSent", "scratch", "busMixL", "busMixR", "busL", "busR", "sendD", "sendR",
+    "fxIn", "fxOut",
+]
+
+
+def relocate(text, names, cc):
+    for name in names:
+        # A scalar object's declarations become plain pointer declarations here, in the text: through
+        # the macro they would read `T (*c12r_x);`, which GCC's C++ -Wparentheses reports. An array's
+        # need the parentheses (`T (*c12r_x)[N]`) and are left to the macro.
+        decl = re.compile(r"^((?:extern |static )?(?:C12_LXR_DATA )?(?:struct )?[A-Za-z_]\w*) %s;$" % re.escape(name), re.M)
+        text, n = decl.subn(r"\1 *c12r_%s;" % name, text)
+        m = re.search(r"\b%s\b" % re.escape(name), text)
+        if not m:
+            sys.exit("amalgamate: relocate: %s not found" % name)
+        line = text.rfind("\n", 0, m.start()) + 1
+        text = text[:line] + "#define %s (*c12r_%s)\n" % (name, name) + text[line:]
+    tail = ["\n// ---- the engine's working memory (tools/amalgamate.py, RELOCATE) ----"]
+    tail += ["#undef %s" % n for n in names]
+    tail.append("struct c12_engine_ram {")
+    tail += ["  __typeof__(*c12r_%s) %s __attribute__((aligned(8)));" % (n, n) for n in names]
+    tail.append("};")
+    tail.append("static struct c12_engine_ram* c12_ram_at;")
+    tail.append("unsigned c12_engine_ram_bytes(void) { return (unsigned)sizeof(struct c12_engine_ram); }")
+    tail.append("int c12_engine_ram_bind(void* mem, unsigned bytes) {")
+    tail.append("  struct c12_engine_ram* m = (struct c12_engine_ram*)mem;")
+    tail.append("  if (!m || bytes < sizeof(*m) || ((uintptr_t)mem & 7u)) return -1;")
+    tail.append("  memset(m, 0, sizeof(*m));")
+    tail += ["  c12r_%s = &m->%s;" % (n, n) for n in names]
+    tail.append("  c12_ram_at = m;")
+    tail.append("  return 0;")
+    tail.append("}")
+    tail.append("#ifndef C12_ENGINE_RAM_EXTERNAL")
+    tail.append("// host builds and tests: a static block, bound on first use")
+    tail.append("static struct c12_engine_ram c12_ram_default;")
+    tail.append("#endif")
+    tail.append("int c12_ram_ensure(void) {")
+    tail.append("#ifndef C12_ENGINE_RAM_EXTERNAL")
+    tail.append("  if (!c12_ram_at) c12_engine_ram_bind(&c12_ram_default, sizeof c12_ram_default);")
+    tail.append("#endif")
+    tail.append("  return c12_ram_at ? 0 : -1;")
+    tail.append("}\n")
+    text = text + "\n".join(tail)
+    # every other declaration of a relocated name would now declare a c12r_* pointer of its own
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "shadow.c")
+        with open(src, "w") as f:
+            f.write(text.replace("C12_LXR_CODE", "").replace("C12_LXR_DATA", ""))
+        cmd = [cc, "-std=gnu11", "-fsyntax-only", "-Wshadow"]
+        for h in ["stdint.h", "stddef.h", "string.h", "stdlib.h", "stdio.h", "math.h", "assert.h"]:
+            cmd += ["-include", h]
+        r = subprocess.run(cmd + [src], capture_output=True, text=True)
+        bad = [l for l in r.stderr.split("\n") if "c12r_" in l and ("shadow" in l or "error" in l)]
+        if r.returncode != 0 or bad:
+            sys.stderr.write("\n".join(bad or r.stderr.split("\n")[-40:]) + "\n")
+            sys.exit("amalgamate: relocate: a relocated name is declared again or does not compile")
+    return text
+
+
 def plinky_macro_guard(text, names_file):
     if not os.path.exists(names_file):
         return "", ""
@@ -439,8 +546,10 @@ def main():
         defines += ["POCKET_PACKED_TABLES", "POCKET_PARAM_TABLE"]
     text = postprocess(preprocess(sources(a.tables), defines, a.cc))
     text = apply_fixes(text, CXX_FIXES + (PACKED_FIXES if a.tables == "packed" else []))
+    text = apply_fixes(text, PROTO_FIXES)
     text, rewritten = rewrite_designators(text, a.cc)
     text, literals = single_precision_constants(text)
+    text = relocate(text, RELOCATE, a.cc)
     push, pop = plinky_macro_guard(text, os.path.join(ROOT, "tools", "plinky_macros.txt"))
 
     rev = open(os.path.join(POCKET, "lxr", "CLATTER_REVISION")).read().strip() if os.path.exists(
