@@ -31,3 +31,16 @@ jobs:
             build/clatter_12*.cpp
             build/sim/*.ppm
             build/sim/session.wav
+  # Opt-in (a commit message containing [api-audit]): the declarations CLATTER 12 depends on, as
+  # Plinky's published API bundle states them, for comparison with sim/plinky_sim.h. Short excerpts.
+  api-audit:
+    if: contains(github.event.head_commit.message, '[api-audit]')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Published Plinky API (pinned)
+        run: sh tools/fetch-plinky-headers.sh || echo "::warning::Plinky API bundle changed or unreachable"
+      - name: Declarations CLATTER 12 depends on
+        run: |
+          wc -l build/plinky_library.h
+          python3 tools/api_excerpt.py build/plinky_library.h
