@@ -33,8 +33,33 @@ DEFAULT = [
 ]
 
 
+def ranges(path, specs):
+    """--range A-B ... : those lines; --grep REGEX ... : matching lines with two lines either side"""
+    lines = open(path, errors="replace").read().split("\n")
+    it = iter(specs)
+    for kind in it:
+        arg = next(it)
+        if kind == "--range":
+            a, b = (int(x) for x in arg.split("-"))
+            print("==== lines %d-%d" % (a, b))
+            for k in range(a - 1, min(b, len(lines))):
+                print("%6d  %s" % (k + 1, lines[k][:240]))
+        elif kind == "--grep":
+            rx = re.compile(arg)
+            hits = [i for i, l in enumerate(lines) if rx.search(l)]
+            print("==== /%s/: %d line(s)" % (arg, len(hits)))
+            last = -1
+            for i in hits[:12]:
+                for k in range(max(i - 2, last + 1), min(i + 3, len(lines))):
+                    print("%6d  %s" % (k + 1, lines[k][:240]))
+                    last = k
+                print("        ...")
+
+
 def main():
     path = sys.argv[1]
+    if len(sys.argv) > 2 and sys.argv[2].startswith("--"):
+        return ranges(path, sys.argv[2:])
     names = sys.argv[2:] or DEFAULT
     lines = open(path, errors="replace").read().split("\n")
     shown, budget = set(), 700
