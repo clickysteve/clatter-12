@@ -44,10 +44,9 @@ jobs:
         run: |
           wc -l build/plinky_library.h
           python3 tools/api_excerpt.py build/plinky_library.h \
-            --range 28-58 --range 84-100 --range 106-135 --range 150-300 --range 486-515 --range 2062-2110 \
-            --range 3218-3236 --range 3070-3092 --range 3300-3345 --range 4589-4600 --range 4640-4666 \
-            --range 9036-9060 --range 9596-9616 --range 9690-9714 --range 10120-10146 \
-            --grep 'serialise_base64_bytes' --grep '\btime_us\(' --grep 'PROFILE_FOURCC|profile_|debug_stack' \
-            --grep 'has_sequencer_just_loaded' --grep 'is_panel_load_staged|request_panel_load_finalise|PANEL_PAGE_LOAD_STAGE_ONLY' \
-            --grep 'BLOCK_SIZE|SAMPLE_RATE|sample rate|32000|32 kHz' --grep 'switch(es|ing)? panels?|panel switch|destruct|placement' \
-            --grep 'void saveload\(|bool saveload\(' --grep 'XIP|flash cache|time_critical'
+            --range 396-486 --range 516-536 --range 4206-4250 \
+            --grep 'NUM_PRESETS_INCLUDING_MIX|define NUM_PRESETS|MODULATION_SOURCE_LAST' --grep 'struct synth_preset_t|struct lfo_recording_t|sizeof\(synth_preset_t\)|sizeof\(panel_t\)' \
+            --grep 'refresh_modulation_masks|synth_note_up_all' --grep 'panel_page_load_mode_t|PANEL_PAGE_LOAD_' \
+            --grep 'PANEL_MEMORY|panel_memory_bytes|PANEL_ARENA|131072|128 \* 1024' --grep 'debug_breadcrumb|define PROFILE_FOURCC|dsp_us|audio_us|load_pct|cpu_pct' \
+            --grep 'memory_copying' --grep 'get_scroll_page|get_scroll_target_page' --grep 'SAMPLE_FREQ|define BLOCK_SIZE|REVERBBUF_SAMPLES' \
+            --grep 'on_dsp_final_mix|do_fx\(' --grep 'static_assert\(sizeof'
