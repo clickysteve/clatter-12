@@ -1,13 +1,2 @@
 # what the next [api-audit] commit prints: --range A-B / --grep REGEX, one word per line
---range
-9736-9800
---grep
-left pair|adjust the current system value|system value while
---grep
-draw_system_style_bool_settings_page|draw_system_style_enum_settings_page
---grep
-on_click\(|default_panel_button_click|BUTTON_[A-Z_]+ *=
---grep
-during (a )?commit|while .* commit|on_ui.*(suspend|paus|suppress)|suppress.*on_ui
---grep
-panel save|save.*shadow|serialis.*shadow|snapshot.*save
+# (empty: the default list in tools/api_excerpt.py)

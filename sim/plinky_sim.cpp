@@ -167,7 +167,7 @@ void serialiser_t::field_base64(const char *name, void *data, int &bytes, int ma
 static int ripples;
 void show_ripple(int16_t, int16_t, uint32_t) { ripples++; }
 // The sim records what the page shows (sim::settings_*), and returns a delta a test injected
-// (sim::settings_touch), as Plinky returns the change a touch on the page asks for.
+// (sim::settings_nudge), as Plinky returns "the current left-button edit delta".
 static char settings_name[8], settings_value[16];
 static int settings_bar, settings_pending;
 int draw_system_style_settings_page(const char *name4, const char *value4, int bar_percent, int, int, uint32_t) {
@@ -214,7 +214,7 @@ int saveload_y() { return saveload_y_; }
 const char *settings_name_shown() { return settings_name; }
 const char *settings_value_shown() { return settings_value; }
 int settings_bar_shown() { return settings_bar; }
-void settings_touch(int delta) { settings_pending = delta; }
+void settings_nudge(int delta) { settings_pending = delta; }
 // called by the driver once per UI frame, before on_ui: the edges the panel sees
 void ui_frame_edges() {
   memcpy(down_prev, down_now, sizeof down_now);

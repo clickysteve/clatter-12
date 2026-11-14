@@ -218,6 +218,6 @@ int saveload_y();                       // the y the last save/load picker was d
 const char *settings_name_shown();      // the last system-style settings page drawn: its name,
 const char *settings_value_shown();     // value
 int settings_bar_shown();               // and bar
-void settings_touch(int delta);         // the next settings page drawn returns this delta
+void settings_nudge(int delta);         // a left side button: the next settings page drawn returns this delta
 void write_ppm(const char *path, int scale);
 } // namespace sim

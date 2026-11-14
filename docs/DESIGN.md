@@ -415,7 +415,7 @@ one reading each, so no musical page is given up and nothing is drawn over a pag
 | Page | Reading |
 |---|---|
 | DSP | the audio core's load: this panel's `on_dsp` time as a share of the 2000 us block, over the last half second; green under 70 %, amber to 85 %, red above |
-| PEAK | the longest callback since reset. **Touch its value: every peak and count resets** (also on OVER, LATE and SPRD) |
+| PEAK | the longest callback since reset. **Press either left side button: every peak and count resets** (also on OVER, LATE and SPRD; the left pair adjust a settings page's value, as on Plinky's own) |
 | OVER | callbacks whose own work outlasted the block (the bar: how often one passed 85 % lately) |
 | LATE | callbacks that started more than 1.25 blocks after the previous one, and the converter's underruns |
 | SPRD | DSP spreading: the most LXR stages one callback ran lately (12 a block) |

@@ -25,7 +25,7 @@ CLATTER 12 has no installer, never touches the bootloader, and writes only its o
 | static SRAM | **1.7 KB**. Firmware 90bd leaves about 20 KB for a panel (less the heap); 0.0.4 needed 140 KB and could not have linked |
 | panel object | CLATTER 12's own 90 KB (engine 41 KB, reverb lines 26 KB, sine table 8 KB) **plus Plinky's own `panel_t`** (its synth preset bank, about 24 KB by its header): about 114 KB of the 128 KB limit. If Plinky's part is larger than estimated the build stops with "must fit Plinky's 128 KB panel arena": report it |
 | PSRAM | 576 KB of it: 92 KB LXR wavetables and transients (from 0), 256 KB delay (from 128 KB), 33 KB undo (from 384 KB), up to 64 KB for a save or load (from 448 KB), the 16-slot pattern bank twice over, 2 x 32 KB (from 512 KB) |
-| flash | 171 KB code + 27 KB constants at `-O3` |
+| flash | 175 KB code + 27 KB constants at `-O3` |
 
 ## Stop conditions (any stage)
 
@@ -51,7 +51,7 @@ not included, so treat 85 % as the limit, not 100 %.
 | Page | Shows | Healthy |
 |---|---|---|
 | **DSP** | average load over the last half second (% of the 2000 us block) | under 70 %: green; 70-85 %: amber; over 85 %: stop |
-| **PEAK** | the longest callback since reset. **Touch the value to reset every peak and count** | under 85 % |
+| **PEAK** | the longest callback since reset. **Press either left side button here to reset every peak and count** (on a settings page the left pair adjust the value shown, by Plinky's header; they do not nudge the tempo there). Also on OVER, LATE and SPRD | under 85 % |
 | **OVER** | callbacks whose own work outlasted the block; the bar: how often one passed 85 % lately | 0 |
 | **LATE** | callbacks that started over 1.25 blocks after the previous one (the nearest a panel can see to an output underrun; the firmware does not expose its own), plus the converter's underruns | 0 |
 | **SPRD** | the most LXR stages one callback ran lately (DSP spreading: 12 = one LXR block; 24 = two) | about 12-19 |
@@ -59,7 +59,9 @@ not included, so treat 85 % as the limit, not 100 %.
 | **MEM** | the panel object's size; `ERR` if the delay, undo or tables found no memory | about `114K` (it includes Plinky's own part), never `ERR` |
 
 **Connect for logging** in the IDE prints every 2 s:
-`c12 dsp avg A max M us of 2000 (peak P since reset); over O near N late L gap G us; lxr .. mix .. rs .. us; stages max S; ...; clip C limited .. under U`.
+`c12 dsp avg A max M us of 2000 (peak P since reset); over O near N late L gap G us; lxr .. mix .. rs .. us; stages max S; ...; clip C limited .. under U; pattern switches W (late X)`.
+`late X` counts pattern switches that could not be made on their step because the grid was writing
+the pattern at that instant (made a step later instead): expect 0.
 In Plinky's emulator the clock does not move inside a callback: DSP and PEAK read `n/a`.
 
 **Signs of audio deadline failure**: OVER or LATE above 0; PEAK near or over 100 %; `gap` well over
@@ -78,8 +80,9 @@ errors. If the IDE refuses the size, stop (it accepted 483 KB for Flash before).
 
 **1. Install and first boot.** **Flash**. If the build fails, copy the whole error and stop: a link
 error naming RAM ("region RAM overflowed") means the static SRAM estimate is wrong. The panel appears
-in Plinky's list and opens on SEQ; the log shows `clatter12: engine up, out rate 32000 Hz`. Nothing
-plays until PLAY. Settings pages: **MEM** shows about `114K`, not `ERR`. Idle **DSP**: note it.
+in Plinky's list and opens on SEQ; the log shows `clatter12: engine up, out rate 32000 Hz; panel
+object N bytes (CLATTER 12's own .., Plinky's panel_t ..) of 131072`. **Write those three sizes down**:
+Plinky's part is only estimated until a device prints it. Nothing plays until PLAY. Settings pages: **MEM** shows about `114K`, not `ERR`. Idle **DSP**: note it.
 
 **2. Navigation.** Row 15's first eight pads jump to SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT, SAVE;
 the right side buttons scroll the same, and above SEQ the seven diagnostic pages. Every page lights.
@@ -105,7 +108,8 @@ here, note which addition started it.
 **7. Tempo and transport.** Tap TEMPO four times; hold it for the overlay, +1/-10, half, double.
 Change tempo quickly for ten seconds while playing: LATE stays 0.
 
-**8. Diagnostics.** Touch PEAK's value: PEAK, OVER and LATE return to 0. Optional **8b**: flash
+**8. Diagnostics.** On the PEAK page press a left side button: PEAK, OVER and LATE return to 0 (if they
+do not, say so: the reset relies on the value Plinky's settings-page call returns). Optional **8b**: flash
 `clatter_12_cycles.cpp` (it enables the core's cycle counter, a debug register a debugger also
 uses) and repeat stage 5: the log adds `cycles .. max .. (N MHz)`, the real core clock and cycles per
 block, which turn QEMU's instruction counts into a real estimate. Then flash `clatter_12.cpp` again.
@@ -117,7 +121,8 @@ exactly on the next bar line (listen for the downbeat: no flam, no gap, no doubl
 NOW and END. With delay and reverb sends up, switch to an empty slot: the tails ring on. Tap VARY a few
 times and BACK. Build a chain (hold an entry, tap a slot; repeats on row 8), CHAIN on, PLAY: it
 follows the chain; ONCE stops at its end. Hold PERFORM's MUTE through a switch: it stays muted. Watch
-**PEAK**, **OVER** and **LATE** throughout: a switch must not move them.
+**PEAK**, **OVER** and **LATE** throughout: a switch must not move them; in the log, `pattern switches`
+counts up and `late` stays 0.
 
 **10. Saving and reloading.** The SAVE page must show Plinky's slot picker on its own grid (before
 0.0.5 it was drawn off-page: report it if the page is blank). With several pattern slots and a chain

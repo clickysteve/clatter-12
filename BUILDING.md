@@ -42,15 +42,16 @@ make
 
 ## Panel variants
 
-| File | LXR tables (100 KB) | LXR per-sample code | Try it when |
+| File | LXR wavetables and transients (92 KB) | LXR per-sample code | Try it when |
 |---|---|---|---|
 | `clatter_12.cpp` | PSRAM | flash (XIP) | first |
 | `clatter_12_cycles.cpp` | PSRAM | flash | to read the core's cycle counter and clock in the log (it enables a debug register; HARDWARE_TESTING.md stage 8b) |
 | `clatter_12_sram.cpp` | PSRAM | SRAM (`.time_critical`, 15 KB) | only if Plinky confirms static SRAM to spare: 17 KB of static SRAM against a budget of about 18 KB |
 | `clatter_12_full.cpp` | PSRAM | flash | reading (comments kept); the simulator and the web page use it |
 
-In every variant the engine's working memory (39 KB) and the reverb's lines (26 KB) are in the panel
-object, the delay's lines (256 KB) and the undo history (33 KB) in PSRAM, and static SRAM is 1.7 KB:
+In every variant the engine's working memory (41 KB), the reverb's lines (26 KB) and the sine table
+(8 KB, read every sample: kept out of slow PSRAM) are in the panel object, the 16-slot pattern bank
+(2 x 32 KB), the delay's lines (256 KB) and the undo history (33 KB) in PSRAM, and static SRAM is 1.7 KB:
 Plinky's firmware leaves a panel about 20 KB (ARCHITECTURE.md "Memory"). Tables in static SRAM, as
 0.0.4 had them, cannot link (`--extra "C12_TABLES_IN_PSRAM 0"` still builds it, for comparison).
 All are generated: edit `core/`, `panel/` or the tools, never `build/`. Each file's header records

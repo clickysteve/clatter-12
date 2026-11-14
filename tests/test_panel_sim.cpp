@@ -1414,6 +1414,93 @@ int main() {
       load(save_text, save_len);
       CHECK(vel(3, 4) == 88 && P->proj.version == 3, "saved again, as version 3");
     }
+    // ---- 0.0.7: the bank in PSRAM, loads into the other area, saves from a copy
+    {
+      CHECK((const uint8_t *)P->bank >= sim_psram && (const uint8_t *)P->bank < sim_psram + (1u << 20), "the pattern bank is in PSRAM, not in the panel object");
+      // a load is read into the other bank area: the patterns playing are untouched until the commit
+      for (int i = 0; i < 16; i++) saved[i] = slot_pat(i);
+      save();
+      c12glue::slot_t *live_bank = P->bank;
+      P->seq_cell(4, 2, c12::c12x_cell(55, 0)); // (after the save: the file does not have it)
+      P->flush();
+      static uint8_t bank_before[sizeof(c12glue::slot_t) * 16];
+      memcpy(bank_before, live_bank, sizeof bank_before);
+      memset(staged_mem, 0, sizeof staged_mem);
+      clatter12 *st = new (staged_mem) clatter12();
+      P->on_prepare_staged_load(st, sizeof staged_mem);
+      serialiser_t rs(true, save_text, sizeof save_text, save_len);
+      const bool ok = st->on_serialise(rs, st->get_version());
+      CHECK(ok && st->bank != live_bank && st->bank_sel != P->bank_sel && memcmp(bank_before, live_bank, sizeof bank_before) == 0 && vel(4, 2) == 55,
+            "a file is read into the other bank area: the live bank and the pattern playing are untouched until the commit");
+      P->on_commit_staged_load_audio_thread(st, sizeof(clatter12));
+      P->on_load_finished();
+      run_ms(40);
+      all = P->bank != live_bank && vel(4, 2) == 0;
+      for (int i = 0; i < 16; i++) all = all && slot_is(i, saved[i]);
+      CHECK(all, "after the commit the loaded bank is the one in use");
+
+      // a slot written while it waits to play: it plays the new steps
+      stop_transport();
+      run_ms(40);
+      tap(0, 0);
+      tap(15, 15);
+      run_ms(300);
+      tap(4, 0); // slot 5 queued (QUANT is END: after the pattern)
+      CHECK(P->queued_slot() == 4, "slot 5 queued");
+      c12::pocket_pattern fresh;
+      memset(&fresh, 0, sizeof fresh);
+      fresh.cell[2][3] = c12::c12x_cell(91, 0);
+      P->work.pat = fresh;
+      P->slot_write(4, P->work.pat, nullptr);
+      CHECK(P->queued_slot() == 4, "still queued after it is written");
+      until_switch(9000);
+      CHECK(P->cur == 4 && vel(2, 3) == 91 && hits(*pat()) == 1, "a slot written while it waits plays its new steps");
+
+      // Plinky may serialise a save from a COPY of the panel (its second arena). The copy does not
+      // own the engine; the engine has switched since the copy was made. The save must still end,
+      // and be right.
+      tap(1, 3); // QUANT: BAR
+      P->seq_cell(6, 5, c12::c12x_cell(44, 0)); // an edit to slot 5, playing
+      tap(0, 0);  // slot 1 queued
+      static unsigned char copy_mem[sizeof(clatter12)];
+      memcpy(copy_mem, (const void *)P, sizeof copy_mem); // the copy, made while slot 5 plays
+      clatter12 *cp = (clatter12 *)(void *)copy_mem;
+      {
+        const uint32_t sw = c12::c12_seq_switches();
+        for (int i = 0; i < 8000 && c12::c12_seq_switches() == sw; i++) audio_block(); // audio only
+        CHECK(c12::c12_seq_switches() == sw + 1 && !cp->engine_ready() && cp->cur == 4, "the engine switched after the copy was made; the copy is not the engine's owner");
+      }
+      static char copy_text[65536];
+      serialiser_t ws(false, copy_text, sizeof copy_text);
+      const bool wrote = cp->on_serialise(ws, cp->get_version());
+      CHECK(wrote && ws.len > 400, "a save serialised from the copy ends, and writes the project (%d bytes)", ws.len);
+      run_ms(40);
+      CHECK(P->cur == 0 && c12::c12x_cell_velocity(P->bank[4].pat.cell[6][5]) == 44, "the live panel then takes the switch in as usual: slot 5 has its edit");
+      stop_transport();
+      run_ms(40);
+      load(copy_text, ws.len);
+      CHECK(P->cur == 0 && c12::c12x_cell_velocity(P->bank[4].pat.cell[6][5]) == 44 && c12::c12x_cell_velocity(P->bank[4].pat.cell[2][3]) == 91,
+            "and that save loads: the slot playing when it was written, slot 5 with every edit");
+
+      // deleting chain entries while the chain plays: no stale entry
+      hold_tap(0, 6, 3, 0);
+      hold_tap(1, 6, 12, 0);
+      hold_tap(2, 6, 13, 0);
+      while (P->chain_len > 3) { tap(P->chain_len - 1, 6); tap(4, 8); }
+      tap(0, 6);
+      if (!P->chain_on) tap(0, 8);
+      tap(15, 15);
+      run_ms(300);
+      tap(2, 6); // jump to entry 3: it is the next
+      CHECK(P->chain_on && P->ch_next == 2, "the chain will jump to its third entry");
+      tap(4, 8); // DEL: the selected entry (the third) is gone
+      CHECK(P->chain_len == 2 && P->ch_next < P->chain_len, "that entry deleted: the chain does not point past its end (next %d of %d)", P->ch_next, P->chain_len);
+      run_ms(4500);
+      CHECK(P->ch_pos < P->chain_len && is_transport_playing(), "and it plays on within the two entries left");
+      tap(0, 8);
+      stop_transport();
+      run_ms(40);
+    }
     CHECK(sizeof(clatter12) <= 128 * 1024, "with the bank, the panel object is %u bytes of 128 KB", (unsigned)sizeof(clatter12));
     tap(SEQ, 15);
     if (P->pat_overlay) tap(SEQ, 15);
@@ -1432,8 +1519,8 @@ int main() {
     // a clock that moves 40 us at each reading: on_dsp's own two readings, the engine's per stage
     sim::set_read_tick_us(40);
     sim::set_scroll_page(-2);
-    sim::settings_touch(1);
-    run_ms(8); // PEAK touched: everything reset
+    sim::settings_nudge(1);
+    run_ms(8); // a left side button on PEAK: everything reset
     run_ms(600);
     sim::set_scroll_page(-1);
     run_ms(8);
@@ -1466,10 +1553,10 @@ int main() {
     CHECK(!strcmp(sim::settings_name_shown(), "LATE") && atoi(sim::settings_value_shown()) >= 1, "LATE page shows it");
     // reset from the PEAK page
     sim::set_scroll_page(-2);
-    sim::settings_touch(-1);
+    sim::settings_nudge(-1);
     run_ms(8);
     CHECK(c12glue::g_diag.over == 0 && c12glue::g_diag.late == 0 && c12glue::g_diag.max_gap_us <= blk,
-          "touching PEAK resets the peaks and counts");
+          "a left side button on PEAK resets the peaks and counts");
     sim::set_scroll_page(-5);
     run_ms(8);
     CHECK(!strcmp(sim::settings_name_shown(), "SPRD") && atoi(sim::settings_value_shown()) >= 12, "SPRD: the stages one callback ran (12 a block)");

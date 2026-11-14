@@ -40,7 +40,7 @@ Pocket update must be re-checked against `seq_switch` and `test_perform`'s patte
 
 **What changed in Part 1 and why**
 - The engine's zero-initialised file-scope objects (LXR voices and parameters, Pocket's ring and
-  patterns, CLATTER 12's converter and buses: 39 KB) are reached through pointers into a generated
+  patterns, CLATTER 12's converter and buses: 39 KB then, 41 KB with the queued pattern) are reached through pointers into a generated
   struct (`tools/amalgamate.py` RELOCATE) that the panel holds (`engine_ram`). Same code, same values;
   the tool fails if a relocated name is declared twice or has an initialiser. Adding a large static to
   the engine? Add its name to RELOCATE, or `make m33` fails its 8 KB budget.

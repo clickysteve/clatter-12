@@ -578,7 +578,9 @@ struct clatter12 : panel_t {
     c12::c12_seq_set_live_slot(cur);
     __atomic_store_n(&engine_token, ENGINE_TOKEN, __ATOMIC_RELEASE);
     __atomic_store_n(&g_engine_owner, (void *)this, __ATOMIC_RELEASE);
-    printf("clatter12: engine up, out rate %d Hz\n", (int)SAMPLE_FREQ);
+    // (the sizes say how much of the 128 KB panel limit Plinky's own panel_t takes on this firmware)
+    printf("clatter12: engine up, out rate %d Hz; panel object %u bytes (CLATTER 12's own %u, Plinky's panel_t %u) of 131072\n",
+           (int)SAMPLE_FREQ, (unsigned)sizeof(*this), (unsigned)(sizeof(*this) - sizeof(panel_t)), (unsigned)sizeof(panel_t));
   }
   // A new project (boot without a remembered song; Plinky's blank slot 00/00): everything a project
   // holds back at its defaults, in this object and in the engine, which keeps running.
@@ -700,7 +702,7 @@ struct clatter12 : panel_t {
   void take(c12glue::snapshot_t &s) { take_slot(s, cur); }
   void take_slot(c12glue::snapshot_t &s, int slot) {
     // (no lock: the history is in PSRAM, which is slow to write; copied again if a switch happened)
-    for (;;) {
+    for (int tries = 0; tries < RETRIES; tries++) {
       bank_sync();
       const bool live = slot == cur;
       const c12::pocket_pattern *p = live ? c12::pocket_seq_pattern() : &bank[slot].pat;
@@ -860,14 +862,20 @@ struct clatter12 : panel_t {
     alt_strength = 0; // a MUTATE held through the switch plays a mutation of the new pattern
   }
   // every frame, and before any read: a switch made is taken in (cheap when there is none)
+  // (Any object may ask: Plinky may serialise a save from a copy of the panel, which does not own
+  // the engine but must still follow it, or flush() would never see the pattern settle.)
   void bank_sync() {
-    if (!engine_ready() || c12::c12_seq_switches() == sw_seen) return;
+    if (!g_ready_now() || c12::c12_seq_switches() == sw_seen) return;
     seq_lock();
     seq_unlock();
   }
+  // The read-again loops below end as soon as no switch happened during a copy. A switch takes a
+  // step at least, so one retry is the most that is ever needed; RETRIES bounds them all the same,
+  // so that nothing unforeseen can hang the UI: the worst outcome is a copy one switch out of date.
+  static const int RETRIES = 8;
   // a consistent copy of slot i's steps (the engine's if it is the slot playing), without the lock
   void read_slot(int i, c12::pocket_pattern &out) {
-    for (;;) {
+    for (int tries = 0; tries < RETRIES; tries++) {
       bank_sync();
       if (i != cur) {
         if (&out != &bank[i].pat) out = bank[i].pat;
@@ -880,7 +888,7 @@ struct clatter12 : panel_t {
   // `p` (in this object, not in the bank) becomes slot i's steps: in the engine if it is the slot
   // playing, else in the bank; and if slot i is waiting to play, it waits with these steps
   void put_slot(int i, const c12::pocket_pattern &p) {
-    for (;;) {
+    for (int tries = 0;;) {
       seq_lock();
       if (i == cur) {
         c12::c12_seq_put_locked(&p, (unsigned)i);
@@ -892,7 +900,7 @@ struct clatter12 : panel_t {
       bank[i].pat = p; // (PSRAM: the lock is not held)
       set_filled(i, has_steps(p));
       seq_lock();
-      if (sw_seen == sw) {
+      if (sw_seen == sw || ++tries >= RETRIES) {
         unsigned q = 0;
         const unsigned mode = c12::c12_seq_queued(&q);
         if (mode && mode != c12::C12_SWITCH_STOP && (int)q == i) c12::c12_seq_queue_locked(&p, q, bank[i].swing, mode);
@@ -970,13 +978,13 @@ struct clatter12 : panel_t {
   // Slot i's steps into qbuf and the lock taken with nothing switched since: the bank is read
   // without the lock, and read again if the engine switched meanwhile. Returns with the lock HELD.
   void lock_with_slot(int i) {
-    for (;;) {
+    for (int tries = 0;; tries++) {
       bank_sync();
       const uint32_t sw = sw_seen;
       if (i == cur) qbuf = *c12::pocket_seq_pattern();
       else qbuf = bank[i].pat;
       seq_lock();
-      if (sw_seen == sw && c12::c12_seq_switches() == sw) return;
+      if ((sw_seen == sw && c12::c12_seq_switches() == sw) || tries >= RETRIES) return;
       seq_unlock();
     }
   }
@@ -3119,8 +3127,8 @@ struct clatter12 : panel_t {
   // no musical page is given up for them. Each shows one reading:
   //   -1 DSP   core 1's load: this panel's own on_dsp time as a share of the block (2000 us at 32 kHz),
   //            averaged over the last half second
-  //   -2 PEAK  the longest callback since the last reset, as a share. Touch its value: reset every
-  //            peak and count on these pages
+  //   -2 PEAK  the longest callback since the last reset, as a share. Either left side button: reset
+  //            every peak and count on these pages (the call returns the left buttons' delta)
   //   -3 OVER  callbacks whose own work outlasted the block (the bar: the share over 85 % lately)
   //   -4 LATE  callbacks that started over 1.25 blocks after the one before (Plinky's audio loop
   //            stalled or a callback overran: the nearest a panel can see to an output underrun),
@@ -3274,12 +3282,13 @@ struct clatter12 : panel_t {
     log_sum = d.sum_us;
     unsigned c = prof_acc.calls ? prof_acc.calls : 1;
     printf("c12 dsp avg %u max %u us of %d (peak %u since reset); over %u near %u late %u gap %u us; "
-           "lxr %u mix %u rs %u us; stages max %u; lxr %u/%u blocks (max %u per out); clip %u limited %u under %u",
+           "lxr %u mix %u rs %u us; stages max %u; lxr %u/%u blocks (max %u per out); clip %u limited %u under %u; "
+           "pattern switches %u (late %u)",
            (unsigned)(n ? sum / n : 0), (unsigned)prof_acc.total_max_us, block_us(), (unsigned)d.max_us,
            (unsigned)d.over, (unsigned)d.near, (unsigned)d.late, (unsigned)d.max_gap_us, (unsigned)(prof_acc.lxr_us / c),
            (unsigned)(prof_acc.mix_us / c), (unsigned)(prof_acc.rs_us / c), (unsigned)prof_acc.stages_max,
            (unsigned)st.lxr_blocks, (unsigned)st.out_blocks, (unsigned)st.lxr_max_per_out, (unsigned)st.clipped,
-           (unsigned)prof_acc.limited, (unsigned)st.underruns);
+           (unsigned)prof_acc.limited, (unsigned)st.underruns, (unsigned)c12::c12_seq_switches(), (unsigned)c12::c12_seq_late());
     if (d.cyc_max) printf("; cycles %u max %u (%u MHz)", (unsigned)d.cyc_last, (unsigned)d.cyc_max,
                           (unsigned)(d.last_us ? d.cyc_last / d.last_us : 0));
     printf("\n");

@@ -163,7 +163,7 @@ needs beyond a few hundred bytes lives in the panel object (Plinky's 128 KB aren
 
 | | Size (GCC 13 `-O3`, Cortex-M33, engine and panel, gc-linked: `make m33`) | Where |
 |---|---|---|
-| code | 171 KB at `-O3` (130 KB at `-O2`, 81 KB at `-Os`; `clatter_12_sram.cpp`: 15 KB of it in SRAM) | flash / `.time_critical` SRAM |
+| code | 175 KB at `-O3` (135 KB at `-O2`, 82 KB at `-Os`; `clatter_12_sram.cpp`: 15 KB of it in SRAM) | flash / `.time_critical` SRAM |
 | constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
 | LXR tables, unpacked | 100 KB | PSRAM, from its start (`C12_TABLES_IN_PSRAM 1`, the default) |
 | static state left in static SRAM (sequencer and performance counters, profile, diagnostics) | 1.7 KB | static SRAM |
