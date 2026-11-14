@@ -43,4 +43,4 @@ jobs:
       - name: Declarations CLATTER 12 depends on
         run: |
           wc -l build/plinky_library.h
-          python3 tools/api_excerpt.py build/plinky_library.h
+          python3 tools/api_excerpt.py build/plinky_library.h --request tools/api_audit_request.txt

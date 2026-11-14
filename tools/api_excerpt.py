@@ -9,7 +9,9 @@ of names, the lines of the bundle that declare or document them, so their signat
 behaviour can be compared with the stand-in by eye. Short excerpts only, for interoperability: the
 bundle is Plinky's and is not redistributed (THIRD_PARTY_NOTICES.md).
 
-Run by CI's `api-audit` job, only for commits whose message contains [api-audit].
+Run by CI's `api-audit` job, only for commits whose message contains [api-audit]. With
+`--request FILE` (tools/api_audit_request.txt in CI) the file's `--range A-B` and `--grep REGEX`
+lines are printed instead of the default list; leave the file empty for the default.
 """
 import re, sys
 
@@ -58,6 +60,14 @@ def ranges(path, specs):
 
 def main():
     path = sys.argv[1]
+    # a request file: --range A-B and --grep REGEX arguments, one word per line
+    if len(sys.argv) > 2 and sys.argv[2] == "--request":
+        import os
+        words = [l.strip() for l in open(sys.argv[3])] if os.path.exists(sys.argv[3]) else []
+        words = [w for w in words if w and not w.startswith("#")]
+        if words:
+            return ranges(path, words)
+        sys.argv[2:] = []
     if len(sys.argv) > 2 and sys.argv[2].startswith("--"):
         return ranges(path, sys.argv[2:])
     names = sys.argv[2:] or DEFAULT
