@@ -43,8 +43,4 @@ jobs:
       - name: Declarations CLATTER 12 depends on
         run: |
           wc -l build/plinky_library.h
-          python3 tools/api_excerpt.py build/plinky_library.h \
-            --range 2736-2760 --range 2800-2900 \
-            --grep 'VOICE_PARAM_LAST,|MODULATION_TARGET_LAST,|define LFO_RECORDING_LENGTH|SYNTH_PARAM_LAST,|MIX_PARAM_LAST,|VOICE_PARAM_[A-Z0-9_]+ = ' \
-            --grep 'enum.*voice_param|enum.*modulation_target|typedef enum' --grep 'char song_name|char name\[' \
-            --grep 'sample_ref|struct preset_slice|slice_t'
+          python3 tools/api_excerpt.py build/plinky_library.h

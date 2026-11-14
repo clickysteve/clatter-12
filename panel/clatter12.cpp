@@ -1175,7 +1175,7 @@ struct clatter12 : panel_t {
     }
     while (starts_seen != st) {
       starts_seen++;
-      if (ch_next >= 0) {
+      if (ch_next >= 0 && ch_next < chain_len) {
         ch_pos = ch_next;
         ch_next = -1;
         ch_left = chain_rep[ch_pos];
@@ -2466,6 +2466,7 @@ struct clatter12 : panel_t {
       if (chain_sel >= chain_len && chain_sel) chain_sel--;
       if (!chain_len) chain_off();
       if (ch_pos >= chain_len) ch_pos = 0;
+      if (ch_next >= chain_len) ch_next = -1; // (the entry it pointed at is gone: the chain goes on from ch_pos)
     }
     if (pressed(14, 8) || pressed(15, 8)) { chain_clr_t0 = now; chain_clr_done = false; }
     if ((down(14, 8) || down(15, 8)) && chain_clr_t0 && !chain_clr_done && now - chain_clr_t0 >= CHAIN_CLEAR_US) {
