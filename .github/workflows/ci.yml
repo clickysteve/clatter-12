@@ -44,9 +44,7 @@ jobs:
         run: |
           wc -l build/plinky_library.h
           python3 tools/api_excerpt.py build/plinky_library.h \
-            --range 396-486 --range 516-536 --range 4206-4250 \
-            --grep 'NUM_PRESETS_INCLUDING_MIX|define NUM_PRESETS|MODULATION_SOURCE_LAST' --grep 'struct synth_preset_t|struct lfo_recording_t|sizeof\(synth_preset_t\)|sizeof\(panel_t\)' \
-            --grep 'refresh_modulation_masks|synth_note_up_all' --grep 'panel_page_load_mode_t|PANEL_PAGE_LOAD_' \
-            --grep 'PANEL_MEMORY|panel_memory_bytes|PANEL_ARENA|131072|128 \* 1024' --grep 'debug_breadcrumb|define PROFILE_FOURCC|dsp_us|audio_us|load_pct|cpu_pct' \
-            --grep 'memory_copying' --grep 'get_scroll_page|get_scroll_target_page' --grep 'SAMPLE_FREQ|define BLOCK_SIZE|REVERBBUF_SAMPLES' \
-            --grep 'on_dsp_final_mix|do_fx\(' --grep 'static_assert\(sizeof'
+            --range 2736-2760 --range 2800-2900 \
+            --grep 'VOICE_PARAM_LAST,|MODULATION_TARGET_LAST,|define LFO_RECORDING_LENGTH|SYNTH_PARAM_LAST,|MIX_PARAM_LAST,|VOICE_PARAM_[A-Z0-9_]+ = ' \
+            --grep 'enum.*voice_param|enum.*modulation_target|typedef enum' --grep 'char song_name|char name\[' \
+            --grep 'sample_ref|struct preset_slice|slice_t'
