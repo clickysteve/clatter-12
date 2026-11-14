@@ -964,6 +964,57 @@ static void patterns(void)
 	for (unsigned k = 0; k < ns; k++) loud += ev[k].velocity == 100;
 	CHECK(step_events(3, m0, m1, ev, 64) > 0 && ns == loud && ns >= 3, "the mutation of A played until the bar; after it, B as written (%u)", ns);
 	c12_perf_set_alt(0, 0);
+
+	/* NOW when the pattern playing is about to wrap: the new one starts at its first step (where
+	   the old would have gone), not past the old one's end */
+	struct pocket_pattern one, two;
+	memset(&one, 0, sizeof one);
+	memset(&two, 0, sizeof two);
+	one.cell[0][0] = cell(100);
+	two.last_page = 1;
+	two.cell[3][0] = cell(100);
+	two.cell[3][16] = cell(90);
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = one;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t w0 = ev[0].block;
+	render_to_step(15);
+	c12_seq_queue(&two, 7, 50, C12_SWITCH_NOW);
+	render_ms(400);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	CHECK(ns == 1 && ev[0].velocity == 100 && ev[0].block == step_block(w0, 16, bpm), "NOW at the last step: the new pattern from its first step (%u)", ns);
+
+	/* The control context holds the lock across the boundary (longer than the audio context
+	   waits): the switch is made at the next step, keeping the position; a step late, not a bar */
+	struct pocket_pattern late;
+	memset(&late, 0, sizeof late);
+	for (int s2 = 0; s2 < 16; s2++) late.cell[3][s2] = cell(40 + s2); /* velocity tells the step */
+	start(bpm, 0);
+	*pocket_seq_edit_begin() = patA;
+	pocket_seq_edit_commit();
+	pocket_seq_play(1);
+	render_ms(10);
+	events(0, 1u << C12_TRIG_STEP, 0, ev, 64);
+	const uint32_t t0 = ev[0].block;
+	render_to_step(14);
+	c12_seq_queue(&late, 8, 50, C12_SWITCH_BAR);
+	render_to_step(15);
+	c12_seq_lock(); /* held while the bar line passes */
+	render_to_step(16);
+	CHECK(c12_seq_late() == 1 && c12_seq_switches() == 0 && c12_seq_queued(0) == C12_SWITCH_BAR, "the lock held across the bar: the switch could not be made, and is counted");
+	c12_seq_unlock();
+	render_ms(400);
+	ns = step_events(3, 0, 0xffffffffu, ev, 64);
+	nk = step_events(0, 0, 0xffffffffu, ev + 32, 32);
+	CHECK(c12_seq_switches() == 1 && ns >= 1 && ev[0].block == step_block(t0, 17, bpm) && ev[0].velocity == 41 && nk == 5,
+	      "it is made at the very next step, at that position in the new pattern (step 17, velocity %u); the old pattern's downbeat played", ns ? ev[0].velocity : 0);
+	CHECK(c12_seq_starts() >= 2, "and counted as the new pattern's start, for a chain");
+	struct c12_engine_stats st2;
+	c12_engine_stats_read(&st2);
+	CHECK(st2.underruns == 0, "no underruns");
 }
 
 int main(void)

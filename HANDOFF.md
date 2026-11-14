@@ -1,6 +1,7 @@
 # Handoff (2026-11-13, fifth session: hardware build, diagnostics, pattern banks)
 
-CLATTER 12 0.0.6-exp. Part 1 (0.0.5): hardware build and diagnostics. Part 2 (0.0.6): pattern banks.
+CLATTER 12 0.0.7-exp. Part 1 (0.0.5): hardware build and diagnostics. Part 2 (0.0.6): pattern banks.
+Review (0.0.7): checked against Plinky's real API header; three hardware-breaking faults fixed.
 
 Read this, then docs/HARDWARE_AUDIT.md, HARDWARE_TESTING.md, TESTING.md and docs/DESIGN.md.
 
@@ -8,17 +9,26 @@ Read this, then docs/HARDWARE_AUDIT.md, HARDWARE_TESTING.md, TESTING.md and docs
 errors fixed and checked at `-O3`/`-O2`/`-Os` with warnings as errors (`make m33`, `tools/hw_check.py`);
 **static SRAM cut from 143 KB to 1.7 KB**, because Plinky's firmware leaves a panel only about 20 KB
 (`tools/firmware_ram.py`, on firmware images Plinky's own pipeline built); seven diagnostic settings
-pages and a richer log line; project loads hold the engine while Plinky copies the object. Audio
+pages and a richer log line. Audio
 bit-identical to 0.0.4 (and 0.0.3 with spreading off). Not run in Plinky's emulator or on a device.
 
 **What the next session should do first**
-1. Plinky's IDE: paste `build/clatter_12.cpp` (477 KB), **Test**, then **Flash**: HARDWARE_TESTING.md.
+1. Plinky's IDE: paste `build/clatter_12.cpp` (481 KB), **Test**, then **Flash**: HARDWARE_TESTING.md.
    A link error naming RAM would mean the firmware-image analysis was wrong: report it with the
    firmware code. Stage 5's DSP and PEAK readings, and stage 8b's cycle log, decide the CPU question.
 2. If PSRAM tables prove slow, the sine table (8 KB, read by every oscillator) is the first candidate
    for the panel object (103 KB of 128 used: 8 KB fits).
 
-**Part 2 (0.0.6, its own commit): pattern banks.** Sixteen slots in the panel object (`bank`), the
+**Review (0.0.7, 2026-11-14): checked against Plinky's real header**, which CI can fetch
+(`[api-audit]` in a commit message prints the declarations: `tools/api_excerpt.py`). Read
+docs/HARDWARE_AUDIT.md section 0 first. In short: Plinky's `panel_t` is about 24 KB and counts against
+the 128 KB limit, so the pattern bank lives in PSRAM (two areas; `bank` is a pointer) and nothing in
+PSRAM is touched under the pattern lock (`stash`, `qbuf`, `lock_with_slot`, `put_slot`); loads go through
+an overridden commit hook that never writes the engine tail (no more "hold"); `new_project()` handles
+the blank slot; the engine is owned by the object that brought it up (`engine_ready`). Rule: every
+decision about which slot is playing is made inside `seq_lock` (it syncs first).
+
+**Part 2 (0.0.6, its own commit): pattern banks.** Sixteen slots (`bank`; in PSRAM since 0.0.7), the
 slot playing edited in the engine as before; switching done by the engine on the step
 (`c12_seq_queue`: NOW, BAR, END, STOP; ARCHITECTURE.md "Pattern switching"); the PATTERN overlay
 (tap the lit page pad) and PERFORM row 11; chains; project version 3. Rules that matter when changing
@@ -34,8 +44,7 @@ Pocket update must be re-checked against `seq_switch` and `test_perform`'s patte
   struct (`tools/amalgamate.py` RELOCATE) that the panel holds (`engine_ram`). Same code, same values;
   the tool fails if a relocated name is declared twice or has an initialiser. Adding a large static to
   the engine? Add its name to RELOCATE, or `make m33` fails its 8 KB budget.
-- Because the engine's memory is in the object, `on_prepare_staged_load` holds core 1 before copying
-  (g_hold_req / g_hold_ack), and the hold ends on apply, `on_load_finished`, or 10 s.
+- The engine's memory is the tail of the object; loads never write it (0.0.7, above).
 - Plinky's server very likely compiles at `-O3` (binary comparison, docs/HARDWARE_AUDIT.md §1).
 
 **How things connect** (as before, plus)
@@ -53,7 +62,7 @@ Pocket update must be re-checked against `seq_switch` and `test_perform`'s patte
 experimental; no hardware claim without a device; do not change CLATTER Web or Pocket; the sound is
 the LXR's, never Plinky's synth renamed.
 
-**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (477 KB now; 483 KB
+**Open questions for Plinky** (Discord): the upload size limit for Test and Flash (481 KB now; 483 KB
 reached the compiler); how many pages a panel may have (CLATTER 12 has eight, and seven settings
 pages); the heap size the firmware reserves and how much static SRAM a panel may count on (firmware
 90bd leaves 20 292 B above `.bss`); the core-1 stack size; the real core-1 clock, whether output is

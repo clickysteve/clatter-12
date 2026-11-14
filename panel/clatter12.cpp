@@ -95,7 +95,14 @@ static const uint8_t crush_levels[7] = {16, 12, 10, 8, 6, 5, 4};
 static const uint8_t rate_levels[8] = {127, 100, 80, 60, 45, 32, 20, 10};
 
 // ---- shared with core 1 (single aligned words) ----
-static volatile uint32_t g_ready;          // engine initialised; released by core 0
+// The engine's working memory belongs to one panel object (its engine tail, at the end of the
+// object). g_engine_owner is that object, once its engine is up; an object is ready when it is the
+// owner AND its own tail says so (engine_token), which a freshly constructed object's does not:
+// Plinky zeroes the arena when a panel (re)starts, so a restart brings the engine up again, on
+// clean memory, with its tables unpacked and its delay lines cleared again in PSRAM (which other
+// panels share).
+static void *volatile g_engine_owner;
+static const uint32_t ENGINE_TOKEN = 0x454e4731u; // "ENG1"
 static uint32_t g_failed;                  // bring-up failed: shown as a red pad, not retried
 // Diagnostics (the DSP settings pages, the log): written by core 1 only, once per callback, read by
 // core 0. Times from time_us(), the RP2350's 1 MHz hardware timer: two reads per callback.
@@ -108,18 +115,11 @@ struct diag_t {
   uint32_t late;         // callbacks that started more than 1.25 blocks after the one before
   uint32_t max_gap_us;   // the longest time from one callback's start to the next
   uint32_t last_start;   // 0: the next start is not compared (first callback, after a hold)
-  uint32_t held;         // callbacks spent silent for a project load (hold_engine)
   uint32_t reset_seen;   // the last reset core 0 asked for that core 1 has done
   uint32_t cyc_last, cyc_max; // CPU cycles (C12_DIAG_CYCLES builds only; 0 otherwise)
 };
 static diag_t g_diag;
 static volatile uint32_t g_diag_reset; // core 0 increments: core 1 clears the peaks and counts
-// Project loads (on_prepare_staged_load): core 0 asks core 1 to stop touching the engine, so the
-// copy Plinky makes of the panel object (the engine's memory included) is a consistent one.
-static volatile uint32_t g_hold_req, g_hold_ack;
-static uint32_t g_hold_t0;
-static const uint32_t HOLD_WAIT_US = 20000;     // how long a load waits for core 1 to answer
-static const uint32_t HOLD_TIMEOUT_US = 10000000; // a hold no load finishes is let go after this
 // The LXR's unpacked constant tables, 102 240 bytes (C12_TABLE_BYTES in core/c12_engine.h).
 //   C12_TABLES_IN_PSRAM 1 (default): the start of PSRAM (oscillator reads go through the XIP cache).
 //   C12_TABLES_IN_PSRAM 0: static SRAM. Does NOT fit Plinky's firmware 90bd, which leaves a panel
@@ -250,6 +250,9 @@ static const int C12_PSRAM_UNDO_OFFSET = 384 * 1024;  // the undo history (64 KB
 static const int C12_PSRAM_UNDO_BYTES = 64 * 1024;
 static const int C12_PSRAM_IO_OFFSET = 448 * 1024;   // a save or load, as bytes (64 KB reserved)
 static const int C12_PSRAM_IO_BYTES = 64 * 1024;
+static const int C12_PSRAM_BANK_OFFSET = 512 * 1024; // the pattern bank: two areas of 32 KB (the one in
+static const int C12_PSRAM_BANK_AREA = 32 * 1024;    // use, and the one a project being loaded is read into)
+static const int C12_PSRAM_NEEDED = C12_PSRAM_BANK_OFFSET + 2 * C12_PSRAM_BANK_AREA;
 // REPEAT page: rates (row 4) and beat-repeat lengths (row 9), as c12 divisions
 static const uint8_t rep_rates[16] = {c12::c12x_div_4, c12::c12x_div_8, c12::c12x_div_16, c12::c12x_div_32, c12::c12x_div_64, 0,
                                       c12::c12x_div_4t, c12::c12x_div_8t, c12::c12x_div_16t, c12::c12x_div_32t, 0,
@@ -331,7 +334,7 @@ struct clatter12 : panel_t {
   // undone, on core 0, and 33 KB the 128 KB arena is better without. nullptr: no PSRAM, no undo.
   c12glue::snapshot_t *hist;
   c12glue::snapshot_t scratch;
-  uint8_t hist_at, hist_undo, hist_redo, last_undo_kind;
+  uint8_t hist_at, hist_undo, hist_redo, last_undo_kind, last_undo_slot;
   uint32_t last_undo_us;
   // what was loaded or is about to be saved (and a version-1 file, before it is converted)
   // the settings of a project just loaded (its patterns are in bank), applied by on_ui
@@ -373,8 +376,17 @@ struct clatter12 : panel_t {
   bool scene_stored[c12glue::SCENES];
   uint8_t fx_bank; // FX page: 0 SPACE, 1 COLOUR
   // ---- the pattern bank, the chain and the PATTERN overlay (saved: bank, cur, chain, quant) ----
-  c12glue::slot_t bank[c12glue::SLOTS];
+  // The sixteen slots are in PSRAM (C12_PSRAM_BANK_OFFSET): they are only ever copied whole, at
+  // control rate, and Plinky's 128 KB limit counts its own panel_t (about 24 KB of synth presets)
+  // as well as everything here. Two areas: bank is the one in use; a project being loaded is read
+  // into the other (the staged copy's bank), so the patterns playing are untouched until the commit.
+  // PSRAM is slow: it is never read or written while the pattern lock is held (stash, qbuf).
+  c12glue::slot_t *bank;
+  uint8_t bank_sel;
   c12glue::slot_t work;            // a slot being made (VARY, NEW, a copy): 1.8 KB, never on the stack
+  c12::pocket_pattern stash;       // the pattern a switch replaced, until the lock is let go (sync_locked)
+  c12::pocket_pattern qbuf;        // a slot's steps on their way from the bank into the engine
+  int8_t stash_slot;               // the slot `stash` belongs to, or -1
   uint8_t cur, prev_slot;          // the slot playing (as the engine last said), the one before
   uint32_t sw_seen, starts_seen, stops_seen; // the engine's counters, as last taken in
   uint8_t quant;                   // C12_SWITCH_NOW, _BAR (default), _END
@@ -393,7 +405,8 @@ struct clatter12 : panel_t {
   bool chain_clr_done;
 
   clatter12() {
-    memset(verb_lines, 0, sizeof(verb_lines));
+    // (the engine tail is not touched here: the arena is zeroed before a panel is constructed, and
+    // a copy constructed for a load never has its tail used)
     memset(press, 0, sizeof(press));
     sel_track = sel_step = -1;
     view_page = 0;
@@ -433,6 +446,7 @@ struct clatter12 : panel_t {
     memset(kit, 0, sizeof(kit));
     hist = undo_memory();
     hist_at = hist_undo = hist_redo = 0;
+    last_undo_slot = 0;
     last_undo_kind = c12glue::UNDO_OTHER;
     last_undo_us = 0;
     memset(&proj, 0, sizeof(proj));
@@ -467,7 +481,9 @@ struct clatter12 : panel_t {
     memset(scene_t0, 0, sizeof(scene_t0));
     memset(scene_stored, 0, sizeof(scene_stored));
     fx_bank = 0;
-    for (int i = 0; i < c12glue::SLOTS; i++) slot_defaults(bank[i]);
+    bank_sel = 0;
+    bank = bank_area(0); // (PSRAM itself is not touched here: a copy constructed for a load shares it)
+    stash_slot = -1;
     slot_defaults(work);
     cur = 0;
     prev_slot = 0xff;
@@ -498,7 +514,6 @@ struct clatter12 : panel_t {
     memset(&dv, 0, sizeof(dv));
     log_n = log_sum = 0;
     diag_stages_max = diag_underruns0 = 0;
-    memset(out_block, 0, sizeof(out_block));
     oy = 0;
   }
 
@@ -520,12 +535,18 @@ struct clatter12 : panel_t {
   }
 
   // ------------------------------------------------------------------ engine bring-up (core 0)
+  bool engine_ready() const {
+    return __atomic_load_n(&c12glue::g_engine_owner, __ATOMIC_ACQUIRE) == (const void *)this &&
+           __atomic_load_n(&engine_token, __ATOMIC_ACQUIRE) == c12glue::ENGINE_TOKEN;
+  }
   void engine_bringup() {
     using namespace c12glue;
-    if (g_ready || g_failed) return;
+    if (engine_ready() || g_failed) return;
+    // (a first start, or this object is new: core 1 does nothing with the engine until the token is set)
+    __atomic_store_n(&g_engine_owner, (void *)nullptr, __ATOMIC_RELEASE);
     void *tables = table_memory();
-    if (!tables) {
-      printf("clatter12: no memory for the LXR tables\n");
+    if (!tables || !bank || get_psram_size() < (uint32_t)C12_PSRAM_NEEDED) {
+      printf("clatter12: not enough PSRAM (%u KB of %u)\n", (unsigned)(get_psram_size() >> 10), (unsigned)(C12_PSRAM_NEEDED >> 10));
       g_failed = 1;
       return;
     }
@@ -535,7 +556,9 @@ struct clatter12 : panel_t {
       g_failed = 1;
       return;
     }
-    c12::c12_tables_bind(tables);
+    // the sine table in this object (every sine oscillator and LFO reads it each sample; PSRAM is
+    // behind a small cache); the wavetables and transients where table_memory() says
+    c12::c12_tables_bind2(sine_ram, (uint8_t *)tables + c12::c12x_table_sine_bytes);
     if (c12::c12_engine_init((uint32_t)SAMPLE_FREQ, 0x12c1a77eu) != 0) {
       g_failed = 1;
       printf("clatter12: engine init failed\n");
@@ -548,23 +571,42 @@ struct clatter12 : panel_t {
       c12::c12_space_bind2((uint8_t *)get_psram_ptr() + C12_PSRAM_SPACE_OFFSET, verb_lines);
     else
       printf("clatter12: no PSRAM for the delay and reverb; they are silent\n");
-    c12::c12_kit_design(kit, -1, 0, 50); // the LXR-02 firmware's init kit
-    c12::c12_kit_set_target(kit, c12::c12x_kit_params);
-    __atomic_store_n(&g_ready, 1u, __ATOMIC_RELEASE);
+    // the bank follows the engine's counters from here
+    sw_seen = c12::c12_seq_switches();
+    starts_seen = c12::c12_seq_starts();
+    stops_seen = c12::c12_seq_stops();
+    c12::c12_seq_set_live_slot(cur);
+    __atomic_store_n(&engine_token, ENGINE_TOKEN, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_engine_owner, (void *)this, __ATOMIC_RELEASE);
     printf("clatter12: engine up, out rate %d Hz\n", (int)SAMPLE_FREQ);
   }
-
-  void default_beat() {
-    c12::pocket_pattern *p = edit_begin();
-    memset(p, 0, sizeof(*p));
-    for (int s = 0; s < 16; s += 4) p->cell[0][s] = c12::c12x_cell(110, 0);
-    p->cell[3][4] = p->cell[3][12] = c12::c12x_cell(105, 0);
-    for (int s = 2; s < 16; s += 4) p->cell[5][s] = c12::c12x_cell(80, 0);
-    p->last_page = 0;
-    edit_commit();
-    c12::c12_seq_set_live_slot(0);
+  // A new project (boot without a remembered song; Plinky's blank slot 00/00): everything a project
+  // holds back at its defaults, in this object and in the engine, which keeps running.
+  void new_project() {
+    using namespace c12glue;
+    c12::c12_kit_design(kit, -1, 0, 50); // the LXR-02 firmware's init kit
+    apply_kit();
+    for (int f = 0; f < c12::c12x_fx_params; f++) c12::c12_fx_set(f, c12::c12_fx_default(f));
+    c12::c12_perf_set_alt(nullptr, 0);
+    alt_strength = 0;
+    // the pattern bank: empty but for the default beat in slot 1, playing
+    for (int i = 0; i < SLOTS; i++) slot_defaults(bank[i]);
+    filled = 0;
+    filled_dirty = false;
+    stash_slot = -1;
+    c12::pocket_pattern &p = edit_pat;
+    memset(&p, 0, sizeof(p));
+    for (int st = 0; st < 16; st += 4) p.cell[0][st] = c12::c12x_cell(110, 0);
+    p.cell[3][4] = p.cell[3][12] = c12::c12x_cell(105, 0);
+    for (int st = 2; st < 16; st += 4) p.cell[5][st] = c12::c12x_cell(80, 0);
+    seq_lock_fresh();
+    c12::c12_seq_queue_locked(nullptr, 0, 50, c12::C12_SWITCH_NONE);
     cur = 0;
-    filled_dirty = true;
+    c12::c12_seq_put_locked(&p, 0);
+    c12::pocket_seq_set_swing(50);
+    seq_unlock();
+    chain_reset();
+    apply_mixer();
   }
 
   // ------------------------------------------------------------------ audio (core 1)
@@ -572,7 +614,7 @@ struct clatter12 : panel_t {
     using namespace c12glue;
     (void)audiobuf_in;
     (void)audiobuf_out;
-    if (!__atomic_load_n(&g_ready, __ATOMIC_ACQUIRE)) return false; // mix buffers arrive cleared: silence
+    if (!engine_ready()) return false; // mix buffers arrive cleared: silence
     const uint32_t t0 = time_us();
     const uint32_t c0 = cycles_on() ? cycles_now() : 0;
     diag_t &d = g_diag;
@@ -581,45 +623,15 @@ struct clatter12 : panel_t {
       d.max_us = d.over = d.near = d.late = d.max_gap_us = d.cyc_max = 0;
       d.reset_seen = rq;
     }
-    // A project load holds the engine (hold_engine): one more block, faded out, then silence and
-    // nothing of the engine touched until core 0 lets go; the first block after fades in.
-    int fade = 0; // -1 out, +1 in
-    if (__atomic_load_n(&g_hold_req, __ATOMIC_ACQUIRE)) {
-      d.last_start = 0;
-      if (__atomic_load_n(&g_hold_ack, __ATOMIC_RELAXED)) {
-        d.held++;
-        for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = 0;
-        for (int i = 0; i < BLOCK_SIZE; ++i) mix_buffers_out->delaysend[i] = mix_buffers_out->reverbsend[i] = 0;
-        return false;
-      }
-      fade = -1;
-    } else if (__atomic_load_n(&g_hold_ack, __ATOMIC_RELAXED)) {
-      __atomic_store_n(&g_hold_ack, 0u, __ATOMIC_RELAXED);
-      fade = 1;
-    }
     c12::c12_engine_render(out_block, BLOCK_SIZE);
+    for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = out_block[i];
     // the sends: Plinky's own delay and reverb (its standard chain follows when we return false)
     const int32_t *ds = c12::c12_engine_send(0), *rs = c12::c12_engine_send(1);
-    if (!fade) {
-      for (int i = 0; i < BLOCK_SIZE * 2; ++i) mix_buffers_out->dry[i] = out_block[i];
-      if (ds && rs)
-        for (int i = 0; i < BLOCK_SIZE; ++i) {
-          mix_buffers_out->delaysend[i] = ds[i];
-          mix_buffers_out->reverbsend[i] = rs[i];
-        }
-    } else {
+    if (ds && rs)
       for (int i = 0; i < BLOCK_SIZE; ++i) {
-        const int g = fade > 0 ? i * 256 / BLOCK_SIZE : (BLOCK_SIZE - 1 - i) * 256 / BLOCK_SIZE; // Q8
-        mix_buffers_out->dry[2 * i] = out_block[2 * i] * g >> 8;
-        mix_buffers_out->dry[2 * i + 1] = out_block[2 * i + 1] * g >> 8;
-        mix_buffers_out->delaysend[i] = ds && rs ? ds[i] * g >> 8 : 0;
-        mix_buffers_out->reverbsend[i] = ds && rs ? rs[i] * g >> 8 : 0;
+        mix_buffers_out->delaysend[i] = ds[i];
+        mix_buffers_out->reverbsend[i] = rs[i];
       }
-      if (fade < 0) {
-        __atomic_store_n(&g_hold_ack, 1u, __ATOMIC_RELEASE); // the engine is left alone from here
-        return false;
-      }
-    }
     // timing: this callback's own work, its share of the block, and when it started
     const uint32_t t1 = time_us(), dt = t1 - t0;
     const uint32_t block_us = (uint32_t)BLOCK_SIZE * 1000000u / (uint32_t)SAMPLE_FREQ;
@@ -642,19 +654,6 @@ struct clatter12 : panel_t {
     }
     return false;
   }
-  // ---- project loads: hold core 1 away from the engine while Plinky copies this object ----
-  static void hold_engine() {
-    using namespace c12glue;
-    g_hold_t0 = time_us();
-    __atomic_store_n(&g_hold_req, 1u, __ATOMIC_RELEASE);
-    // core 1 answers within one block; bounded both by time and by count (the emulator's clock
-    // may not move while this waits, and a core 1 that is not running never answers)
-    for (uint32_t spin = 0; !__atomic_load_n(&g_hold_ack, __ATOMIC_ACQUIRE) && spin < 2000000u; ++spin)
-      if (time_us() - g_hold_t0 > HOLD_WAIT_US) break;
-  }
-  static void release_engine() { __atomic_store_n(&c12glue::g_hold_req, 0u, __ATOMIC_RELEASE); }
-  static bool engine_held() { return __atomic_load_n(&c12glue::g_hold_req, __ATOMIC_ACQUIRE) != 0; }
-
   // ------------------------------------------------------------------ page-relative grid access
   int oy; // the current page's first row in Plinky's page canvas (page * 16)
   void led(int x, int y, uint32_t c) { set_led(x, y + oy, c); }
@@ -700,27 +699,24 @@ struct clatter12 : panel_t {
   // a snapshot of a slot's steps (the pattern playing, if it is that slot) and the kit
   void take(c12glue::snapshot_t &s) { take_slot(s, cur); }
   void take_slot(c12glue::snapshot_t &s, int slot) {
-    bank_sync();
-    seq_lock();
-    const c12::pocket_pattern *p = slot == cur ? c12::pocket_seq_pattern() : &bank[slot].pat;
-    memcpy(s.cell, p->cell, sizeof(s.cell));
-    s.last_page = p->last_page;
-    seq_unlock();
+    // (no lock: the history is in PSRAM, which is slow to write; copied again if a switch happened)
+    for (;;) {
+      bank_sync();
+      const bool live = slot == cur;
+      const c12::pocket_pattern *p = live ? c12::pocket_seq_pattern() : &bank[slot].pat;
+      memcpy(s.cell, p->cell, sizeof(s.cell));
+      s.last_page = p->last_page;
+      if (!live || c12::c12_seq_switches() == sw_seen) break;
+    }
     memcpy(s.kit, kit, sizeof(s.kit));
     s.slot = (uint8_t)slot;
   }
   void restore(const c12glue::snapshot_t &s) {
     const int slot = s.slot < c12glue::SLOTS ? s.slot : cur;
-    if (slot == cur) {
-      c12::pocket_pattern *p = edit_begin();
-      memcpy(p->cell, s.cell, sizeof(s.cell));
-      p->last_page = s.last_page;
-      edit_commit();
-    } else {
-      memcpy(bank[slot].pat.cell, s.cell, sizeof(s.cell));
-      bank[slot].pat.last_page = s.last_page;
-      show_ripple(slot, 0 + oy, WHITE);
-    }
+    memcpy(edit_pat.cell, s.cell, sizeof(s.cell)); // (no edit is under way during an undo)
+    edit_pat.last_page = s.last_page;
+    put_slot(slot, edit_pat);
+    if (slot != cur) show_ripple(slot, 0 + oy, WHITE);
     memcpy(kit, s.kit, sizeof(s.kit));
     apply_kit();
   }
@@ -734,10 +730,13 @@ struct clatter12 : panel_t {
   void push_undo(int kind, uint32_t now) {
     using namespace c12glue;
     if (!hist) return;
-    if (kind != UNDO_OTHER && kind == last_undo_kind && now - last_undo_us < MERGE_US && hist_undo) {
+    bank_sync();
+    // edits of one kind close together are one undo, while they are to the same pattern slot
+    if (kind != UNDO_OTHER && kind == last_undo_kind && cur == last_undo_slot && now - last_undo_us < MERGE_US && hist_undo) {
       last_undo_us = now;
       return;
     }
+    last_undo_slot = cur;
     take(hist[hist_at]);
     hist_at = (uint8_t)((hist_at + 1) % UNDO_DEPTH);
     if (hist_undo < UNDO_DEPTH) hist_undo++;
@@ -781,47 +780,51 @@ struct clatter12 : panel_t {
 
   // ================================================================== the pattern bank
   // Sixteen slots. The slot playing (cur) lives in the engine (Pocket's pattern) and is edited
-  // there; bank[cur] is brought up to date from it whenever the bank is used (flush). The others
-  // are only here. A switch is queued in the engine (c12_seq_queue), which makes it on the step
-  // asked for; every write of the sequencer's pattern from here holds the pattern lock (seq_lock),
-  // and bank_sync, first, takes in a switch the engine has made: the pattern it replaced (with every
-  // edit made to it until the switch) goes back to its slot.
+  // there; the others are only here, and bank[cur] is brought up to date when the bank is saved
+  // (flush). A switch is queued in the engine (c12_seq_queue_locked), which makes it on the step
+  // asked for. The rules that keep a slot from ever receiving another slot's steps:
+  //   - every write of the sequencer's pattern is made between seq_lock and seq_unlock;
+  //   - taking the lock first takes in a switch the engine has made (sync_locked): the pattern it
+  //     replaced, with every edit made to it until the switch, goes back to its slot. While the
+  //     lock is held the engine cannot switch, so `cur` is certain for as long as it is held;
+  //   - the lock is held for copies only (the audio core waits for it at a switch). Generators
+  //     and mutations work on a copy (edit_begin .. edit_commit) with the lock released;
+  //   - reading needs no lock: copy, and copy again if a switch happened meanwhile (read_slot).
   int lock_depth;
   void seq_lock() {
-    if (!lock_depth++) c12::c12_seq_lock();
+    if (!lock_depth++) {
+      c12::c12_seq_lock();
+      sync_locked();
+    }
   }
   void seq_unlock() {
-    if (lock_depth && !--lock_depth) c12::c12_seq_unlock();
+    if (lock_depth && !--lock_depth) {
+      c12::c12_seq_unlock();
+      if (stash_slot >= 0) {
+        // what a switch replaced goes to its slot in the bank now, with the lock let go
+        const int i = stash_slot;
+        stash_slot = -1;
+        bank[i].pat = stash;
+        set_filled(i, has_steps(stash));
+      }
+    }
   }
-  c12::pocket_pattern *edit_begin() {
-    bank_sync();
-    seq_lock();
-    return c12::pocket_seq_edit_begin();
+  static c12glue::slot_t *bank_area(int which) {
+    using namespace c12glue;
+    static_assert(sizeof(slot_t) * SLOTS <= (size_t)C12_PSRAM_BANK_AREA, "the pattern bank fits its PSRAM area");
+    if (get_psram_size() < (uint32_t)C12_PSRAM_NEEDED) return nullptr;
+    return (slot_t *)((uint8_t *)get_psram_ptr() + C12_PSRAM_BANK_OFFSET + (which ? C12_PSRAM_BANK_AREA : 0));
   }
-  void edit_commit() {
-    c12::pocket_seq_edit_commit();
-    seq_unlock();
+  // the lock, for a bank that has just replaced the one the engine was playing from (a loaded or a
+  // new project): whatever the engine switched before now is not this bank's to take in
+  void seq_lock_fresh() {
+    c12::c12_seq_lock();
+    lock_depth = 1;
+    sw_seen = c12::c12_seq_switches();
   }
-  void seq_cell(int t, int s, uint32_t c) {
-    bank_sync();
-    seq_lock();
-    c12::pocket_seq_set_cell(t, s, c);
-    seq_unlock();
-  }
-  void seq_last_page(unsigned lp) {
-    bank_sync();
-    seq_lock();
-    c12::pocket_seq_set_last_page(lp);
-    seq_unlock();
-  }
-  void set_swing(int v) {
-    c12::pocket_seq_set_swing(v);
-    bank[cur].swing = (uint8_t)c12::pocket_seq_swing();
-  }
-  // the slot's own generator settings follow it (GEN page)
+  // the slot's own generator settings follow it (GEN page). Its swing is kept in bank[] as it is set.
   void slot_meta_store(int i) {
     c12glue::slot_t &b = bank[i];
-    b.swing = (uint8_t)c12::pocket_seq_swing();
     b.style = style;
     b.density = density;
     b.complexity = complexity;
@@ -842,35 +845,101 @@ struct clatter12 : panel_t {
     b.complexity = 50;
     b.gen_seed = 1;
   }
-  // take in a switch the engine made since the last look (core 0, any time)
-  void bank_sync() {
-    if (!c12glue::g_ready || lock_depth) return;
+  // (lock held) take in a switch the engine made since the last look
+  void sync_locked() {
     const uint32_t sw = c12::c12_seq_switches();
     if (sw == sw_seen) return;
-    seq_lock();
-    slot_meta_store(cur); // (its swing is the new one's now: kept from when it was set)
-    const uint8_t keep_swing = bank[cur].swing;
-    bank[cur].pat = *c12::pocket_seq_replaced();
-    bank[cur].swing = keep_swing;
-    seq_unlock();
+    stash = *c12::pocket_seq_replaced(); // (to the bank when the lock is let go)
+    stash_slot = (int8_t)cur;
+    slot_meta_store(cur);
     prev_slot = cur;
     cur = (uint8_t)(c12::c12_seq_live_slot() % c12glue::SLOTS);
     sw_seen = sw;
-    bank[cur].swing = (uint8_t)c12::pocket_seq_swing();
     slot_meta_load(cur);
     sel_track = sel_step = -1;
     alt_strength = 0; // a MUTATE held through the switch plays a mutation of the new pattern
-    filled_dirty = true;
   }
-  // bank[cur] from the pattern playing
-  void flush() {
-    bank_sync();
+  // every frame, and before any read: a switch made is taken in (cheap when there is none)
+  void bank_sync() {
+    if (!engine_ready() || c12::c12_seq_switches() == sw_seen) return;
     seq_lock();
-    bank[cur].pat = *c12::pocket_seq_pattern();
     seq_unlock();
+  }
+  // a consistent copy of slot i's steps (the engine's if it is the slot playing), without the lock
+  void read_slot(int i, c12::pocket_pattern &out) {
+    for (;;) {
+      bank_sync();
+      if (i != cur) {
+        if (&out != &bank[i].pat) out = bank[i].pat;
+        return;
+      }
+      out = *c12::pocket_seq_pattern();
+      if (c12::c12_seq_switches() == sw_seen) return; // no switch while it was copied: it is slot i's
+    }
+  }
+  // `p` (in this object, not in the bank) becomes slot i's steps: in the engine if it is the slot
+  // playing, else in the bank; and if slot i is waiting to play, it waits with these steps
+  void put_slot(int i, const c12::pocket_pattern &p) {
+    for (;;) {
+      seq_lock();
+      if (i == cur) {
+        c12::c12_seq_put_locked(&p, (unsigned)i);
+        seq_unlock();
+        return;
+      }
+      const uint32_t sw = sw_seen;
+      seq_unlock();
+      bank[i].pat = p; // (PSRAM: the lock is not held)
+      set_filled(i, has_steps(p));
+      seq_lock();
+      if (sw_seen == sw) {
+        unsigned q = 0;
+        const unsigned mode = c12::c12_seq_queued(&q);
+        if (mode && mode != c12::C12_SWITCH_STOP && (int)q == i) c12::c12_seq_queue_locked(&p, q, bank[i].swing, mode);
+        seq_unlock();
+        return;
+      }
+      seq_unlock(); // a switch was made meanwhile (slot i may be the one playing now): again
+    }
+  }
+  // To change the pattern playing: a copy to work on (edit_begin), put back as that slot's steps
+  // (edit_commit) even if another slot has started playing meanwhile. Not nested.
+  c12::pocket_pattern edit_pat;
+  uint8_t edit_slot;
+  c12::pocket_pattern *edit_begin() {
+    read_slot(cur, edit_pat); // (cur as read_slot leaves it: the slot whose steps these are)
+    edit_slot = cur;
+    return &edit_pat;
+  }
+  void edit_commit() { put_slot(edit_slot, edit_pat); }
+  void seq_cell(int t, int s, uint32_t c) {
+    seq_lock();
+    c12::pocket_seq_set_cell(t, s, c);
+    seq_unlock();
+  }
+  void seq_last_page(unsigned lp) {
+    seq_lock();
+    c12::pocket_seq_set_last_page(lp);
+    seq_unlock();
+  }
+  void set_swing(int v) {
+    seq_lock();
+    c12::pocket_seq_set_swing(v);
+    bank[cur].swing = (uint8_t)c12::pocket_seq_swing();
+    seq_unlock();
+  }
+  void cancel_queue() {
+    seq_lock();
+    c12::c12_seq_queue_locked(nullptr, 0, 50, c12::C12_SWITCH_NONE);
+    seq_unlock();
+  }
+  // bank[cur] from the pattern playing (before the bank is saved)
+  void flush() {
+    read_slot(cur, bank[cur].pat);
     slot_meta_store(cur);
   }
-  // which slots have steps (the playing one from the engine): a mask, recomputed when it may change
+  // which slots have steps: a mask kept as slots are written (the bank is in PSRAM: it is scanned
+  // whole only after a project is loaded or made new); the slot playing is looked at in the engine
   uint16_t filled;
   bool filled_dirty;
   static bool has_steps(const c12::pocket_pattern &p) {
@@ -879,11 +948,15 @@ struct clatter12 : panel_t {
         if (p.cell[t][st] & 0x7fu) return true;
     return false;
   }
+  void set_filled(int i, bool on) {
+    if (on) filled |= (uint16_t)(1u << i);
+    else filled &= (uint16_t)~(1u << i);
+  }
   uint16_t filled_mask() {
     if (filled_dirty) {
       filled = 0;
       for (int i = 0; i < c12glue::SLOTS; i++)
-        if (i != cur && has_steps(bank[i].pat)) filled |= (uint16_t)(1u << i);
+        if (has_steps(bank[i].pat)) filled |= (uint16_t)(1u << i);
       filled_dirty = false;
     }
     const uint16_t live = has_steps(*c12::pocket_seq_pattern()) ? (uint16_t)(1u << cur) : 0;
@@ -894,41 +967,59 @@ struct clatter12 : panel_t {
     const unsigned m = c12::c12_seq_queued(&q);
     return m && m != c12::C12_SWITCH_STOP ? (int)q : -1;
   }
-  // put slot i in place at once (stopped, or a seamless duplicate)
+  // Slot i's steps into qbuf and the lock taken with nothing switched since: the bank is read
+  // without the lock, and read again if the engine switched meanwhile. Returns with the lock HELD.
+  void lock_with_slot(int i) {
+    for (;;) {
+      bank_sync();
+      const uint32_t sw = sw_seen;
+      if (i == cur) qbuf = *c12::pocket_seq_pattern();
+      else qbuf = bank[i].pat;
+      seq_lock();
+      if (sw_seen == sw && c12::c12_seq_switches() == sw) return;
+      seq_unlock();
+    }
+  }
+  // put slot i in place at once (stopped)
   void slot_now(int i) {
-    flush();
-    c12::c12_seq_cancel();
-    seq_lock();
-    c12::pocket_pattern *p = c12::pocket_seq_edit_begin();
-    *p = bank[i].pat;
-    c12::pocket_seq_edit_commit();
-    c12::pocket_seq_set_swing(bank[i].swing);
-    c12::c12_seq_set_live_slot((unsigned)i);
+    lock_with_slot(i);
+    c12::c12_seq_queue_locked(nullptr, 0, 50, c12::C12_SWITCH_NONE); // nothing stays queued
+    if (i != cur) {
+      stash = *c12::pocket_seq_pattern(); // the pattern playing goes back to its slot (seq_unlock)
+      stash_slot = (int8_t)cur;
+      slot_meta_store(cur);
+      prev_slot = cur;
+      c12::c12_seq_put_locked(&qbuf, (unsigned)i);
+      c12::pocket_seq_set_swing(bank[i].swing);
+      cur = (uint8_t)i;
+    }
     seq_unlock();
-    if (i != cur) prev_slot = cur;
-    cur = (uint8_t)i;
     slot_meta_load(i);
     sel_track = sel_step = -1;
     alt_strength = 0;
-    filled_dirty = true;
+  }
+  // (any time) queue slot i to play at `mode`, unless it is the slot playing
+  void queue_slot(int i, unsigned mode) {
+    lock_with_slot(i);
+    if (i != cur) c12::c12_seq_queue_locked(&qbuf, (unsigned)i, bank[i].swing, mode);
+    seq_unlock();
   }
   // play slot i: at once when stopped, else at the QUANT point (mode 0: QUANT). The slot playing,
   // picked again, cancels what is queued; the slot queued, picked again, too.
   void select_slot(int i, int mode = 0) {
-    bank_sync();
     if (stopped()) {
       slot_now(i);
       return;
     }
+    lock_with_slot(i);
     const int q = queued_slot();
     if (q == i || (i == cur && q >= 0)) {
-      c12::c12_seq_cancel();
-      return;
+      c12::c12_seq_queue_locked(nullptr, 0, 50, c12::C12_SWITCH_NONE);
+    } else if (i != cur) {
+      c12::c12_seq_queue_locked(&qbuf, (unsigned)i, bank[i].swing, (unsigned)(mode ? mode : quant));
+      ch_owns_queue = false;
     }
-    if (i == cur) return;
-    flush();
-    c12::c12_seq_queue(&bank[i].pat, (unsigned)i, bank[i].swing, (unsigned)(mode ? mode : quant));
-    ch_owns_queue = false;
+    seq_unlock();
   }
   // the next slot after the one playing that has no steps (and is not queued), or -1
   int next_empty() {
@@ -940,38 +1031,43 @@ struct clatter12 : panel_t {
     }
     return -1;
   }
-  // write a pattern into slot i (undoable); the slot playing is written in the engine
+  // write a pattern (and, if given, its swing and generator settings) into slot i, undoably
   void slot_write(int i, const c12::pocket_pattern &pat, const c12glue::slot_t *meta) {
     push_undo_slot(i);
-    if (i == cur) {
-      c12::pocket_pattern *p = edit_begin();
-      *p = pat;
-      edit_commit();
-    } else {
-      bank[i].pat = pat;
-    }
+    put_slot(i, pat);
+    seq_lock();
     if (meta) {
-      bank[i].swing = meta->swing;
-      bank[i].style = meta->style;
-      bank[i].density = meta->density;
-      bank[i].complexity = meta->complexity;
-      bank[i].gen_seed = meta->gen_seed;
+      c12glue::slot_t &b = bank[i];
+      b.swing = meta->swing;
+      b.style = meta->style;
+      b.density = meta->density;
+      b.complexity = meta->complexity;
+      b.gen_seed = meta->gen_seed;
       if (i == cur) {
-        set_swing(meta->swing);
+        c12::pocket_seq_set_swing(b.swing);
         slot_meta_load(i);
       }
     }
-    filled_dirty = true;
+    seq_unlock();
+  }
+  // slot `from`, steps and settings, into `work`
+  void slot_to_work(int from) {
+    read_slot(from, work.pat);
+    if (from == cur) slot_meta_store(cur);
+    const c12glue::slot_t &b = bank[from];
+    work.swing = b.swing;
+    work.style = b.style;
+    work.density = b.density;
+    work.complexity = b.complexity;
+    work.gen_seed = b.gen_seed;
   }
   void slot_copy(int from, int to) {
     if (from == to) return;
-    flush();
-    work = bank[from];
+    slot_to_work(from);
     slot_write(to, work.pat, &work);
     show_ripple(to, 0 + oy, WHITE);
   }
   void slot_clear(int i) {
-    flush();
     slot_defaults(work);
     slot_write(i, work.pat, &work);
     show_ripple(i, 0 + oy, RED);
@@ -983,10 +1079,7 @@ struct clatter12 : panel_t {
     if (to < 0 || to == cur) { show_ripple(0, 4 + oy, RED); return; }
     slot_copy(cur, to);
     if (stopped()) slot_now(to);
-    else {
-      flush();
-      c12::c12_seq_queue(&bank[to].pat, (unsigned)to, bank[to].swing, c12::C12_SWITCH_NOW);
-    }
+    else queue_slot(to, c12::C12_SWITCH_NOW);
   }
   // VARY: a variation of the pattern playing (Pocket's mutation, locked tracks kept) into `to`
   // (or the next empty, then queued at QUANT); the original is untouched
@@ -994,11 +1087,9 @@ struct clatter12 : panel_t {
     const bool play = to < 0;
     if (to < 0) to = next_empty();
     if (to < 0) { show_ripple(3, 4 + oy, RED); return; }
-    flush();
-    c12glue::slot_t &v = work;
-    v = bank[cur];
-    c12::pocket_gen_mutate(&v.pat, (gen_seed << 16) ^ (0x7a71u + ++vary_takes), vary_strength, track_locks);
-    slot_write(to, v.pat, &v);
+    slot_to_work(cur);
+    c12::pocket_gen_mutate(&work.pat, (gen_seed << 16) ^ (0x7a71u + ++vary_takes), vary_strength, track_locks);
+    slot_write(to, work.pat, &work);
     show_ripple(to, 0 + oy, LED_RGB(0, 31, 18));
     if (play) select_slot(to);
   }
@@ -1007,9 +1098,8 @@ struct clatter12 : panel_t {
     const bool play = to < 0;
     if (to < 0) to = next_empty();
     if (to < 0) { show_ripple(6, 4 + oy, RED); return; }
-    flush();
+    slot_to_work(cur);
     c12glue::slot_t &v = work;
-    v = bank[cur];
     v.gen_seed = next_random() & 0xffffu;
     c12::pocket_gen_settings gs;
     gs.seed = v.gen_seed;
@@ -1038,7 +1128,7 @@ struct clatter12 : panel_t {
   }
   // the chain stops leading (CHAIN off, or a slot picked by hand): what it queued is cancelled
   void chain_off() {
-    if (ch_owns_queue) c12::c12_seq_cancel();
+    if (ch_owns_queue) cancel_queue();
     ch_owns_queue = false;
     chain_on = false;
   }
@@ -1064,7 +1154,7 @@ struct clatter12 : panel_t {
     const int slot = chain_slot[e];
     if (stopped()) slot_now(slot);
     else if (slot != cur) select_slot(slot, quant == c12::C12_SWITCH_NOW ? (int)c12::C12_SWITCH_BAR : (int)quant);
-    else c12::c12_seq_cancel(); // the slot is playing: the entry starts with its next pass
+    else cancel_queue(); // the slot is playing: the entry starts with its next pass
   }
   // every frame: count the passes, and queue what follows an entry's last pass, for its end
   // the engine stopped at the chain's end (ONCE): Plinky's transport stops too. Before the transport
@@ -1101,15 +1191,16 @@ struct clatter12 : panel_t {
       const int n = next_entry(ch_pos);
       ch_queued = true;
       if (n < 0) {
-        c12::c12_seq_queue(nullptr, cur, (unsigned)c12::pocket_seq_swing(), c12::C12_SWITCH_STOP);
+        seq_lock();
+        c12::c12_seq_queue_locked(nullptr, cur, bank[cur].swing, c12::C12_SWITCH_STOP);
+        seq_unlock();
         ch_owns_queue = true;
         return;
       }
       ch_next = (int8_t)n;
       const int slot = chain_slot[n];
       if (slot != cur) {
-        flush();
-        c12::c12_seq_queue(&bank[slot].pat, (unsigned)slot, bank[slot].swing, c12::C12_SWITCH_END);
+        queue_slot(slot, c12::C12_SWITCH_END);
         ch_owns_queue = true;
       }
     }
@@ -2940,18 +3031,17 @@ struct clatter12 : panel_t {
     }
     chain_on = false;
     const int c = p.cur % SLOTS;
-    c12::c12_seq_cancel();
-    seq_lock();
-    c12::pocket_pattern *pt = c12::pocket_seq_edit_begin();
-    *pt = bank[c].pat;
-    c12::pocket_seq_edit_commit();
-    c12::pocket_seq_set_swing(bank[c].swing);
-    c12::c12_seq_set_live_slot((unsigned)c);
-    seq_unlock();
+    qbuf = bank[c].pat;
+    const int swing_c = bank[c].swing;
+    stash_slot = -1;
+    seq_lock_fresh(); // (the bank is the loaded one: nothing of the pattern that was playing is kept)
+    c12::c12_seq_queue_locked(nullptr, 0, 50, c12::C12_SWITCH_NONE);
     cur = (uint8_t)c;
+    c12::c12_seq_put_locked(&qbuf, (unsigned)c);
+    c12::pocket_seq_set_swing(swing_c);
+    seq_unlock();
     prev_slot = p.prev < SLOTS ? p.prev : 0xff;
     slot_meta_load(c);
-    sw_seen = c12::c12_seq_switches();
     chain_reset();
     filled_dirty = true;
     release_all_perf();
@@ -2965,9 +3055,9 @@ struct clatter12 : panel_t {
     using namespace c12glue;
     (void)version;
     uint8_t *io = io_memory();
-    if (!io) {
+    if (!io || !bank) {
       printf("clatter12: no PSRAM for saving and loading\n");
-      return true;
+      return !s.reading; // a load without it fails; a save writes nothing of CLATTER 12's
     }
     int bytes = 0;
     if (s.reading) memset(io, 0, (size_t)C12_PSRAM_IO_BYTES); // a field a file lacks must not keep older bytes
@@ -2977,30 +3067,48 @@ struct clatter12 : panel_t {
     OBJECT_END(s);
     if (s.reading) {
       load_pending = decode_any(io, bytes);
-      if (load_pending) want_default = false;
-      else printf("clatter12: the saved project is not one this version reads (%d bytes); not loaded\n", bytes);
+      if (!load_pending) {
+        // not a CLATTER 12 project (or damaged): the load fails, as a field that cannot be read does
+        printf("clatter12: the saved project is not one this version reads (%d bytes); not loaded\n", bytes);
+        return false;
+      }
+      want_default = false;
     }
     return true;
   }
-  static bool g_ready_now() { return c12glue::g_ready != 0; }
-  void on_load_finished(void) override {
-    panel_t::on_load_finished();
-    release_engine();
+  // (on_serialise may run on a copy of the panel: is any panel's engine up?)
+  static bool g_ready_now() { return __atomic_load_n(&c12glue::g_engine_owner, __ATOMIC_ACQUIRE) != nullptr; }
+
+  // ---- project loads (Plinky's staged loads; its header, "Panel Lifecycle") ----
+  // Plinky constructs a fresh copy of the panel in its second arena, calls on_prepare_staged_load on
+  // this one, reads the file into the copy (on_serialise), and then, from the audio core at a safe
+  // point, writes the copy over this object (on_commit_staged_load_audio_thread; by default a
+  // memcpy of the whole object). The blank slot 00/00 skips the prepare and the file: the copy is
+  // only constructed and given on_setup_default_panel_state.
+  // The engine's memory is at the end of this object and is running: no load may write it. So the
+  // commit copies only what comes before it (state_bytes): Plinky's own commit, asked to copy that
+  // much. The engine plays on through a load, and its reverb tail with it; on_ui then gives it the
+  // loaded project (load_pending) or a new one (want_default).
+  size_t state_bytes() const { return (size_t)((const uint8_t *)&engine_token - (const uint8_t *)this); }
+  size_t own_begin() const { return (size_t)((const uint8_t *)&press - (const uint8_t *)this); } // the first member declared
+  void on_commit_staged_load_audio_thread(panel_t *loaded_state, size_t panel_memory_size) override {
+    const size_t n = state_bytes();
+    panel_t::on_commit_staged_load_audio_thread(loaded_state, panel_memory_size < n ? panel_memory_size : n);
   }
-  // Before a load is read, the staged copy is given this panel's present state, so a file that is
-  // refused (or lacks CLATTER 12's field) leaves everything as it was when the copy replaces it.
-  // The engine's memory is in this object too (engine_ram), and core 1 writes it every block: it
-  // is held first (hold_engine: one faded block, then silence), so the copy is of a still engine,
-  // and Plinky's commit, which writes the staged object back over this one, returns it unchanged.
-  // The hold ends when the load is applied (on_ui), finishes (on_load_finished) or, failing both,
-  // after HOLD_TIMEOUT_US.
+  // Before a file is read, the copy is given this panel's present state (its own members; Plinky
+  // has prepared the base's), so a load that is committed although the file was not one of ours
+  // still leaves everything as it was.
   bool on_prepare_staged_load(panel_t *staged, size_t panel_memory_size) override {
     if (staged && panel_memory_size >= sizeof(*this)) {
-      if (g_ready_now()) hold_engine();
-      // everything but the reverb lines (the last member; the staged object's are silent)
-      const size_t state = (size_t)((const uint8_t *)verb_lines - (const uint8_t *)this);
-      memcpy((void *)staged, (const void *)this, state);
-      ((clatter12 *)staged)->load_pending = false;
+      const size_t a = own_begin(), b = state_bytes();
+      memcpy((uint8_t *)(void *)staged + a, (const uint8_t *)(const void *)this + a, b - a);
+      clatter12 *st = (clatter12 *)staged;
+      st->load_pending = false;
+      // its pattern bank is the other PSRAM area, starting as a copy of this one: the file is read
+      // into it while this panel plays on from its own
+      st->bank_sel = (uint8_t)!bank_sel;
+      st->bank = bank_area(st->bank_sel);
+      if (bank && st->bank) memcpy((void *)st->bank, (const void *)bank, sizeof(c12glue::slot_t) * c12glue::SLOTS);
     }
     return panel_t::on_prepare_staged_load(staged, panel_memory_size);
   }
@@ -3049,9 +3157,7 @@ struct clatter12 : panel_t {
     diag_underruns0 = st.underruns;
   }
   static uint32_t load_col(int pct) { return pct < 70 ? LED_RGB(0, 31, 8) : pct < 85 ? LED_RGB(31, 24, 0) : LED_RGB(31, 0, 0); }
-  bool memory_ok() const {
-    return hist && get_psram_size() >= (uint32_t)(c12glue::C12_PSRAM_SPACE_OFFSET + c12::c12x_space_delay_bytes);
-  }
+  bool memory_ok() const { return hist && bank && get_psram_size() >= (uint32_t)c12glue::C12_PSRAM_NEEDED; }
   void draw_diag_page(int page) {
     using namespace c12glue;
     char val[24]; // four characters are shown; room for any number, so nothing is ever truncated
@@ -3185,28 +3291,23 @@ struct clatter12 : panel_t {
     (void)delta_time_us;
     oy = 0;
     engine_bringup();
-    if (!g_ready) {
+    if (!engine_ready()) {
       leds_clear();
       set_led(0, 0, RED);
       return;
     }
-    if (engine_held()) {
-      // a project is being loaded (on_prepare_staged_load): nothing touches the engine until it
-      // has been (load_pending, below), Plinky says it has finished, or it never comes
-      if (!load_pending && time_us() - c12glue::g_hold_t0 < c12glue::HOLD_TIMEOUT_US) return;
-      release_engine();
-    }
     if (load_pending) {
-      // a staged load replaced this object: its project is checked, now it reaches the engine
+      // a staged load replaced this object's state: its project is checked, now it reaches the engine
       load_pending = false;
       if (proj.magic == PROJECT_MAGIC && proj.version == PROJECT_VERSION) apply_project();
       want_default = false;
       hist_at = hist_undo = hist_redo = 0;
     }
     if (want_default) {
-      default_beat();
-      apply_mixer();
+      // boot without a remembered song, or the blank slot: this object is as constructed
+      new_project();
       want_default = false;
+      hist_at = hist_undo = hist_redo = 0;
     }
     // every frame, on every page: the kit streams, the transport and tempo follow Plinky's
     c12::c12_kit_pump(48);
@@ -3304,21 +3405,24 @@ struct clatter12 : panel_t {
   }
 
 
+  // ================================================================== the engine tail
+  // From engine_token to the end of the object: the engine's, never written by a project load
+  // (state_bytes). Declare nothing after it that a load should replace.
+  uint32_t engine_token; // ENGINE_TOKEN once this object's engine is up; 0 in a new object (zeroed arena)
   // core 1's output block (written and read only in on_dsp)
   alignas(4) int16_t out_block[BLOCK_SIZE * 2];
-  // The engine's working memory (39 KB: the LXR's voices and parameters, Pocket's event ring and
+  // The engine's working memory (41 KB: the LXR's voices and parameters, Pocket's event ring and
   // patterns, CLATTER 12's converter and buses; c12_engine_ram_bind). Here, in the panel arena,
-  // because Plinky's firmware leaves a panel only about 20 KB of static SRAM. Core 1 writes it
-  // every block: on_prepare_staged_load copies it only while core 1 is held (hold_engine), so
-  // the copy Plinky later writes back over this object is the state the engine was left in.
+  // because Plinky's firmware leaves a panel only about 20 KB of static SRAM.
   c12::c12_engine_ram engine_ram;
-
+  // The LXR's sine table (8 KB), unpacked here at bring-up: fast SRAM for the table read most.
+  alignas(4) int16_t sine_ram[c12::c12x_table_sine_bytes / 2];
   // CLATTER 12's reverb lines (26 KB), in the panel's SRAM arena: the reverb reads them as six
-  // scattered streams, which PSRAM (behind the XIP cache) serves badly. Last in the object (declare nothing after it), and
-  // kept out of on_prepare_staged_load's copy: a load (Plinky copies the staged object over this
-  // one) leaves them as the staged object's constructor made them, silent, rather than putting
-  // back a snapshot of an older tail. Not saved. The delay's lines (256 KB) are in PSRAM.
+  // scattered streams, which PSRAM (behind the XIP cache) serves badly. Not saved. The delay's
+  // lines (256 KB) are in PSRAM.
   alignas(4) int16_t verb_lines[c12::c12x_space_verb_bytes / 2];
 };
 // Plinky constructs the panel in a 128 KB arena; a panel that does not fit must not compile.
+// The limit counts Plinky's own panel_t (its synth preset bank, about 24 KB) as well as CLATTER 12's
+// members (90 KB): if this fails on Plinky's server, panel_t has grown; report the firmware build.
 static_assert(sizeof(clatter12) <= 128 * 1024, "CLATTER 12's panel object must fit Plinky's 128 KB panel arena");

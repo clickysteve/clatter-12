@@ -155,11 +155,30 @@ struct serialiser_t {
 // The stock save/load page (blocks.h panel_page_t::saveload): the sim draws a placeholder and
 // counts the calls; saving and loading are driven by the test (sim::save, sim::load_into).
 struct panel_page_t {
-  void saveload(int y, bool show_name = true, int flags = 0); // y: the page's absolute row (page * 16)
+  // y: the page's absolute row (page * 16). Plinky's: saveload(int y, bool draw_title = true,
+  // int flags = FLAG_PICKER_ENABLE_DELETE, panel_page_load_mode_t = PANEL_PAGE_LOAD_COMMIT_ASAP)
+  void saveload(int y, bool draw_title = true, int flags = 0);
 };
 
 // ---- the panel base (blocks.h), the hooks CLATTER 12 overrides ----
+// Plinky's panel_t is not empty: it owns the panel's synth preset bank (13 presets), LFO recordings
+// and a song name, and they count against the 128 KB limit on the whole panel object. SIM_PANEL_BASE
+// stands in for them: more than the real size as far as it can be told from the published header
+// (docs/HARDWARE_AUDIT.md), so that a panel that fits here fits there.
+#ifndef SIM_PANEL_BASE
+#define SIM_PANEL_BASE 28672
+#endif
+void synth_note_up_all(void);
 struct panel_t {
+  uint8_t sim_base_state[SIM_PANEL_BASE];
+  void refresh_modulation_masks() {}
+  // core 1, at the audio-safe commit point: the staged copy over this object. Plinky's default,
+  // as its header gives it.
+  virtual void on_commit_staged_load_audio_thread(panel_t *loaded_state, size_t panel_memory_size) {
+    synth_note_up_all();
+    memcpy((void *)this, (const void *)loaded_state, panel_memory_size);
+    refresh_modulation_masks();
+  }
   virtual int get_num_pages(void) { return 1; }
   virtual int get_num_panel_settings_pages(void) { return 0; }
   virtual void on_setup_default_panel_state() {}

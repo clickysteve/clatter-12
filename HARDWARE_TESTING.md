@@ -10,7 +10,7 @@ known and what is not: [docs/HARDWARE_AUDIT.md](docs/HARDWARE_AUDIT.md).
 | | |
 |---|---|
 | Firmware | the current Plinky release. **Write down the firmware build code** the IDE shows |
-| Panel source | `build/clatter_12.cpp` from `make` (477 KB). Optional: `clatter_12_cycles.cpp` (stage 8b) |
+| Panel source | `build/clatter_12.cpp` from `make` (481 KB). Optional: `clatter_12_cycles.cpp` (stage 8b) |
 | IDE | [plinky12.com/codeed.html](https://plinky12.com/codeed.html) (closed beta), Chrome or Edge (WebUSB). Use plinky12.com, not the staging IDE: its device log does not work |
 | Listening | headphones or monitors at **low volume**: a fault can be a full-scale burst |
 | Backup | eject the SD card and copy all of it to a computer; note which panels are installed |
@@ -23,8 +23,8 @@ CLATTER 12 has no installer, never touches the bootloader, and writes only its o
 | | |
 |---|---|
 | static SRAM | **1.7 KB**. Firmware 90bd leaves about 20 KB for a panel (less the heap); 0.0.4 needed 140 KB and could not have linked |
-| panel object | 103.2 KB of Plinky's 128 KB arena (the 16-slot pattern bank 29 KB, the engine's 41 KB of working memory and the reverb's 26 KB included) |
-| PSRAM | 100 KB LXR tables (from 0), 256 KB delay (from 128 KB), 33 KB undo (from 384 KB), up to 64 KB for a save or load (from 448 KB) |
+| panel object | CLATTER 12's own 90 KB (engine 41 KB, reverb lines 26 KB, sine table 8 KB) **plus Plinky's own `panel_t`** (its synth preset bank, about 24 KB by its header): about 114 KB of the 128 KB limit. If Plinky's part is larger than estimated the build stops with "must fit Plinky's 128 KB panel arena": report it |
+| PSRAM | 576 KB of it: 92 KB LXR wavetables and transients (from 0), 256 KB delay (from 128 KB), 33 KB undo (from 384 KB), up to 64 KB for a save or load (from 448 KB), the 16-slot pattern bank twice over, 2 x 32 KB (from 512 KB) |
 | flash | 171 KB code + 27 KB constants at `-O3` |
 
 ## Stop conditions (any stage)
@@ -56,7 +56,7 @@ not included, so treat 85 % as the limit, not 100 %.
 | **LATE** | callbacks that started over 1.25 blocks after the previous one (the nearest a panel can see to an output underrun; the firmware does not expose its own), plus the converter's underruns | 0 |
 | **SPRD** | the most LXR stages one callback ran lately (DSP spreading: 12 = one LXR block; 24 = two) | about 12-19 |
 | **VOX** | voices sounding now, then the effects running: D delay, R reverb, C colour (drive, ring, compressor), P sends to Plinky's effects | as expected |
-| **MEM** | the panel object's size; `ERR` if the delay, undo or tables found no memory | `104K`, never `ERR` |
+| **MEM** | the panel object's size; `ERR` if the delay, undo or tables found no memory | about `114K` (it includes Plinky's own part), never `ERR` |
 
 **Connect for logging** in the IDE prints every 2 s:
 `c12 dsp avg A max M us of 2000 (peak P since reset); over O near N late L gap G us; lxr .. mix .. rs .. us; stages max S; ...; clip C limited .. under U`.
@@ -79,7 +79,7 @@ errors. If the IDE refuses the size, stop (it accepted 483 KB for Flash before).
 **1. Install and first boot.** **Flash**. If the build fails, copy the whole error and stop: a link
 error naming RAM ("region RAM overflowed") means the static SRAM estimate is wrong. The panel appears
 in Plinky's list and opens on SEQ; the log shows `clatter12: engine up, out rate 32000 Hz`. Nothing
-plays until PLAY. Settings pages: **MEM** shows `104K`, not `ERR`. Idle **DSP**: note it.
+plays until PLAY. Settings pages: **MEM** shows about `114K`, not `ERR`. Idle **DSP**: note it.
 
 **2. Navigation.** Row 15's first eight pads jump to SEQ, SOUND, GEN, MIX, FX, PERFORM, REPEAT, SAVE;
 the right side buttons scroll the same, and above SEQ the seven diagnostic pages. Every page lights.
@@ -121,9 +121,10 @@ follows the chain; ONCE stops at its end. Hold PERFORM's MUTE through a switch: 
 
 **10. Saving and reloading.** The SAVE page must show Plinky's slot picker on its own grid (before
 0.0.5 it was drawn off-page: report it if the page is blank). With several pattern slots and a chain
-set, save to a slot. Change everything. Load the slot: the sound fades out, there is a short silence,
-and it fades back in with every pattern slot, the chain and the slot that was playing (the reverb tail
-stops at a load, by design). Load a slot saved by 0.0.4 if you have one: it must load into pattern
+set, save to a slot. Change everything. Load the slot: the sound does not stop (the engine plays through
+a load, reverb tail and all); within a moment every pattern slot, the chain and the slot that was
+playing are the saved ones. Then load Plinky's blank slot `00/00`: the default beat and kit return, still
+without a gap. Load a slot saved by 0.0.4 if you have one: it must load into pattern
 slot 1. Power-cycle and load again.
 
 **11. Recovery check.** Flash the stock panel set from the IDE; confirm the stock panels work and your

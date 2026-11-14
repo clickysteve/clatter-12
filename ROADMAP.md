@@ -69,6 +69,14 @@ v0.1: a seven-voice LXR drum machine with a 16 × 16 touch sequencer, running on
         (two hands), all undoable; PERFORM's row 11 for switching while playing.
   - [x] Chain: 16 entries with repeats, LOOP or ONCE, jump, manual override.
   - [x] Project version 3 (sparse slots, built in PSRAM); versions 1 and 2 load into slot 1.
+- 0.0.7-exp, review against Plinky's published header (docs/HARDWARE_AUDIT.md section 0):
+  - [x] Plinky's `panel_t` (about 24 KB) counts against the 128 KB limit: the pattern bank moved to
+        PSRAM (0.0.6 would not have compiled for hardware); the sine table moved into the object.
+  - [x] Loads through the commit hook, never writing the engine: no silence at a load; the blank slot
+        `00/00` and a panel restart handled (both were broken); a foreign file fails the load.
+  - [x] Pattern lock: switches taken in under the lock (a slot can no longer receive another's steps
+        on a rare timing), generators outside it, a late switch lands a step late, not a bar; a
+        two-thread stress test.
 
 ## 1. Reliable synthesis (needs a device or emulator access)
 

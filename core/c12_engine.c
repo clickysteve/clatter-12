@@ -173,9 +173,12 @@ static struct pocket_pattern queuedPattern;
 static volatile uint8_t qMode, qSlot, qSwing, liveSlot;
 static volatile uint8_t seqEditing, seqSwapping; /* the two sides of the pattern lock */
 static volatile uint32_t seqSwitches, seqStarts, seqStops, seqLate;
-/* how long the audio context waits for the control context's pattern lock (a few microseconds is
-   ever needed; this is about 100 us on a 150 MHz core) */
-#define C12_SWITCH_SPINS 20000u
+static uint8_t qLateNow, qSawMode; /* audio only: a switch missed its boundary; the mode seq_switch saw */
+/* How long the audio context waits for the control context's pattern lock at a boundary: 2 000
+   turns of a loop of about 7 cycles, roughly 0.1 ms on a 150 MHz core (5 % of a 2 ms block). The
+   control context holds the lock for one copy of a pattern (1.8 KB, some 10 us), never across a
+   generator, so the wait is that long at most unless an interrupt lands on it while it holds. */
+#define C12_SWITCH_SPINS 2000u
 
 /* audio only */
 static uint64_t musNow, musStepStart, gridOrigin; /* musical time: phase units of straight sixteenths */
@@ -476,11 +479,23 @@ static void play_step(int step)
 	}
 }
 
-/* Does a queued switch happen at the step after `pos` (whose pattern has `steps` steps)? */
+/* Is `pos` a step a queued switch of this mode is made on? */
+static int switch_on(unsigned mode, int pos)
+{
+	return mode == C12_SWITCH_NOW || (mode == C12_SWITCH_BAR && (pos & 15) == 0) || ((mode == C12_SWITCH_END || mode == C12_SWITCH_STOP) && pos == 0);
+}
+/* Does a queued switch happen at the step after `pos` (whose pattern has `steps` steps)? A switch
+   that missed its boundary (qLateNow) is made at the very next step. */
 static int switch_at(unsigned mode, int pos, int steps)
 {
-	const int next = pos + 1 >= steps ? 0 : pos + 1;
-	return mode == C12_SWITCH_NOW || (mode == C12_SWITCH_BAR && (next & 15) == 0) || ((mode == C12_SWITCH_END || mode == C12_SWITCH_STOP) && next == 0);
+	return qLateNow || switch_on(mode, pos + 1 >= steps ? 0 : pos + 1);
+}
+/* The step of a pattern of `qsteps` steps a switch lands on: its first, or, keeping the position
+   (NOW, and a late switch), where the pattern playing would have gone next. */
+static int switch_to(unsigned mode, int pos, int steps, int qsteps)
+{
+	if (mode != C12_SWITCH_NOW && !qLateNow) return 0;
+	return (pos + 1 >= steps ? 0 : pos + 1) % qsteps;
 }
 
 /* flams and drags: their graces go out before the step, while this one is still playing */
@@ -510,9 +525,8 @@ static void graces_ahead(uint32_t advance)
 		}
 		locked = 1;
 		p = &queuedPattern;
-		const int qsteps = (int)POCKET_PATTERN_STEPS(p);
-		next = mode == C12_SWITCH_NOW ? (pos + 1) % qsteps : 0;
-		pass = 0;
+		next = switch_to(mode, pos, steps, (int)POCKET_PATTERN_STEPS(p));
+		if (next == 0) pass = 0;
 	}
 	const uint32_t remaining = stepLen > stepElapsed ? stepLen - stepElapsed : 0u;
 	for (int t = 0; t < C12_TRACKS; t++)
@@ -760,20 +774,29 @@ static void stage_apply(void)
 /* A queued pattern switch (c12_seq_queue), before pocket_seq_block: if this LXR block's sequencer
  * step is the boundary asked for, the queued pattern goes in now, so that step is already its.
  * Reads pocket_seq.c's own state (this file is built after it in one unit, tools/amalgamate.py):
- * whether the step advances in this block is the same sum pocket_seq_block makes. */
+ * whether the step advances in this block is the same sum pocket_seq_block makes. Pocket's
+ * external (MIDI) clock is not used by CLATTER 12; while it were followed, no switch would be
+ * made (its steps are placed by ticks, not by this sum).
+ * A switch that cannot be made on its boundary (the lock held too long; or, in theory, the tempo
+ * changed between this sum and Pocket's) is made at the next step instead, keeping the position:
+ * a step late, never a bar late. c12_seq_late counts them. */
 static void seq_switch(void)
 {
 	const unsigned mode = __atomic_load_n(&qMode, __ATOMIC_ACQUIRE);
-	if (!mode) return;
+	qSawMode = (uint8_t)mode;
+	if (!mode)
+	{
+		qLateNow = 0;
+		return;
+	}
 	const struct pocket_pattern* cur = &patterns[live];
 	const int steps = (int)POCKET_PATTERN_STEPS(cur);
 	int at = 0;
 	if (!running) at = 1; /* stopped, or starting in this block: now, before the first step */
 	else if (runRequest && !externalClock && phase + unitPerBlock * tempoBpm >= interval) at = switch_at(mode, step, steps);
 	if (!at) return;
-	/* The step boundary is this block or a bar (or a pattern) later, so the switch must be made now.
-	   The control context holds the lock only for a copy of a pattern or a few cells (microseconds):
-	   wait for it, boundedly. Never holding one side while waiting for the other, so no deadlock. */
+	/* The control context holds the lock only for a copy of a pattern or a few cells: wait for it,
+	   boundedly. Neither side holds its own flag while waiting for the other's, so no deadlock. */
 	unsigned spins = 0;
 	for (;;)
 	{
@@ -783,7 +806,12 @@ static void seq_switch(void)
 		while (__atomic_load_n(&seqEditing, __ATOMIC_ACQUIRE) && spins < C12_SWITCH_SPINS) spins++;
 		if (spins >= C12_SWITCH_SPINS)
 		{
-			seqLate++; /* never seen: the switch moves to the next boundary */
+			if (running)
+			{
+				seqLate++;
+				qLateNow = 1; /* the next step */
+			}
+			qSawMode = 0;
 			return;
 		}
 	}
@@ -802,11 +830,12 @@ static void seq_switch(void)
 		const int qsteps = (int)POCKET_PATTERN_STEPS(next);
 		if (running)
 		{
-			/* the step pocket_seq_block advances to: NOW keeps the position (modulo the new length),
-			   BAR and END start the new pattern (its first step, its first pass) */
-			const int to = mode == C12_SWITCH_NOW ? (step + 1) % qsteps : 0;
+			/* the step pocket_seq_block advances to: BAR and END start the new pattern (its first
+			   step, its first pass); NOW, and a late switch, keep the position */
+			const int to = switch_to(mode, step, steps, qsteps);
 			step = (uint8_t)(to == 0 ? qsteps - 1 : to - 1);
 			if (to == 0) pass = 11; /* the wrap makes it 0 */
+			else if (qLateNow && mode != C12_SWITCH_NOW) seqStarts++; /* it started, a step in */
 		}
 		else
 			pass = 0;
@@ -818,6 +847,8 @@ static void seq_switch(void)
 		pfAltMask = 0;
 		seqSwitches++;
 	}
+	qLateNow = 0;
+	qSawMode = 0;
 	__atomic_store_n(&qMode, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&seqSwapping, 0, __ATOMIC_RELEASE);
 }
@@ -835,6 +866,13 @@ static void block_hook(void)
 	const int newStep = pocket_seq_steps_played() != before;
 	const uint32_t advance = 20u * C12_LXR_BLOCK * (uint32_t)pocket_seq_tempo();
 	if (newStep && running && pos == 0) seqStarts++;
+	/* a switch that was waiting when this block began, and a boundary step that played without it
+	   (seq_switch's sum and Pocket's disagreed): the next step */
+	if (qSawMode && newStep && running && switch_on(qSawMode, pos) && __atomic_load_n(&qMode, __ATOMIC_ACQUIRE) == qSawMode)
+	{
+		seqLate++;
+		qLateNow = 1;
+	}
 	/* a scene: on the first step of a bar, before it sounds */
 	if (__atomic_load_n(&stagePending, __ATOMIC_ACQUIRE) && (!running || !stageAtBar || (newStep && (pos & 15) == 0))) stage_apply();
 	clock_update(running, newStep, advance);
@@ -947,17 +985,28 @@ void c12_seq_lock(void)
 	while (__atomic_load_n(&seqSwapping, __ATOMIC_SEQ_CST)) {}
 }
 void c12_seq_unlock(void) { __atomic_store_n(&seqEditing, 0, __ATOMIC_RELEASE); }
-int c12_seq_queue(const struct pocket_pattern* p, unsigned slot, unsigned swing, unsigned mode)
+void c12_seq_queue_locked(const struct pocket_pattern* p, unsigned slot, unsigned swing, unsigned mode)
 {
 	if (mode > C12_SWITCH_STOP) mode = C12_SWITCH_NONE;
-	c12_seq_lock();
 	__atomic_store_n(&qMode, 0, __ATOMIC_RELEASE);
 	if (p) queuedPattern = *p;
 	qSlot = (uint8_t)slot;
 	qSwing = (uint8_t)(swing < POCKET_SEQ_SWING_MIN ? POCKET_SEQ_SWING_MIN : swing > POCKET_SEQ_SWING_MAX ? POCKET_SEQ_SWING_MAX : swing);
 	__atomic_store_n(&qMode, (uint8_t)mode, __ATOMIC_RELEASE);
+}
+int c12_seq_queue(const struct pocket_pattern* p, unsigned slot, unsigned swing, unsigned mode)
+{
+	c12_seq_lock();
+	c12_seq_queue_locked(p, slot, swing, mode);
 	c12_seq_unlock();
 	return 0;
+}
+void c12_seq_put_locked(const struct pocket_pattern* p, unsigned slot)
+{
+	patterns[!live] = *p;
+	POCKET_BARRIER(); /* complete before it can be seen */
+	live = (uint8_t)!live;
+	liveSlot = (uint8_t)slot;
 }
 void c12_seq_cancel(void)
 {
@@ -980,13 +1029,14 @@ uint32_t c12_seq_late(void) { return seqLate; }
 
 /* ------------------------------------------------------------------ init */
 /* Only built packed (tools/amalgamate.py), where the tables are pointers (see PACKED_FIXES). */
-void c12_tables_bind(void* mem)
+void c12_tables_bind(void* mem) { c12_tables_bind2(mem, (uint8_t*)mem + C12_TABLE_SINE_BYTES); }
+
+void c12_tables_bind2(void* sine, void* rest)
 {
 	(void)c12_ram_ensure(); /* host builds: the static working memory; the panel binds its own first */
 #ifdef POCKET_PACKED_TABLES
-	uint8_t* p = (uint8_t*)mem;
-	sine_table = (int16_t*)p;
-	p += 8196; /* 4097 int16, rounded up to 4 bytes */
+	uint8_t* p = (uint8_t*)rest;
+	sine_table = (int16_t*)sine; /* 4097 int16, rounded up to 4 bytes: C12_TABLE_SINE_BYTES */
 	triTable = (int16_t(*)[1024])p;
 	p += 11 * 1024 * 2;
 	sawTable = (int16_t(*)[1024])p;
@@ -995,10 +1045,11 @@ void c12_tables_bind(void* mem)
 	p += 11 * 1024 * 2;
 	transientData = (int8_t(*)[2205])p;
 	p += 12 * 2205;
-	_Static_assert(8196 + 3 * 11 * 1024 * 2 + 12 * 2205 <= C12_TABLE_BYTES, "table memory");
+	_Static_assert(C12_TABLE_SINE_BYTES + 3 * 11 * 1024 * 2 + 12 * 2205 <= C12_TABLE_BYTES, "table memory");
 	tablesBound = 1;
 #else
-	(void)mem;
+	(void)sine;
+	(void)rest;
 	tablesBound = 1;
 #endif
 }
@@ -1027,6 +1078,7 @@ static const uint8_t fxDefault[C12_FX_PARAMS] = {
 int c12_fx_max(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxMax[fx] : 0; }
 int c12_fx_min(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxMin[fx] : 0; }
 int c12_fx_get(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxValue[fx] : 0; }
+int c12_fx_default(int fx) { return fx >= 0 && fx < C12_FX_PARAMS ? fxDefault[fx] : 0; }
 
 void c12_fx_set(int fx, int value)
 {
@@ -1141,6 +1193,7 @@ int c12_engine_init(uint32_t out_rate, uint32_t seed)
 	qMode = qSlot = liveSlot = seqEditing = seqSwapping = 0;
 	qSwing = POCKET_SEQ_SWING_MIN;
 	seqSwitches = seqStarts = seqStops = seqLate = 0;
+	qLateNow = qSawMode = 0;
 	trigCount = blockCount = 0;
 	musNow = musStepStart = gridOrigin = 0;
 	wasRunning = 0;

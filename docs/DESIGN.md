@@ -214,7 +214,7 @@ Every control is checked to change the sound (`tests/test_perform.c`, `tests/tes
 "FX SPACE"). Memory: the delay's 256 KB of 16-bit lines in PSRAM (after the 128 KB the LXR tables
 take), the reverb's 26 KB in the panel object (SRAM). With nothing sent and
 the lines empty (their 16-bit samples truncate to exactly zero as a tail ends) an effect does not run
-at all: off costs nothing, and each idles on its own. Loading a project silences the reverb's tail.
+at all: off costs nothing, and each idles on its own. Loading a project does not interrupt the sound: the engine, with its delay and reverb tails, plays through it.
 CPU: TESTING.md.
 
 ### COLOUR

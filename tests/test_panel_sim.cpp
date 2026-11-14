@@ -120,16 +120,36 @@ static void save() {
   save_len = s.len;
 }
 alignas(16) static unsigned char staged_mem[sizeof(clatter12)];
-static void load(const char *text, int len) {
+// Plinky's sequence (its header, "Panel Lifecycle"): the inactive arena zeroed and a fresh panel
+// constructed in it; on_prepare_staged_load on the live one; the file read into the copy; if that
+// succeeds, the commit on the audio core (the hook, with the whole panel's size), then
+// on_load_finished. Audio blocks run between the steps, as on the device.
+static bool load(const char *text, int len) {
   memset(staged_mem, 0, sizeof staged_mem);
   clatter12 *st = new (staged_mem) clatter12();
   P->on_prepare_staged_load(st, sizeof staged_mem);
+  audio_block();
   static char copy[65536];
   memcpy(copy, text, (size_t)len);
   copy[len] = 0;
   serialiser_t s(true, copy, sizeof copy, len);
-  st->on_serialise(s, st->get_version());
-  memcpy((void *)P, (const void *)st, sizeof(clatter12)); // on_commit_staged_load_audio_thread
+  const bool ok = st->on_serialise(s, st->get_version());
+  audio_block();
+  if (ok) {
+    P->on_commit_staged_load_audio_thread(st, sizeof(clatter12));
+    P->on_load_finished();
+  }
+  run_ms(40);
+  return ok;
+}
+// Plinky's blank slot 00/00 (and request_panel_reset_to_default): a fresh copy, given
+// on_setup_default_panel_state; no on_prepare_staged_load, no file
+static void load_blank() {
+  memset(staged_mem, 0, sizeof staged_mem);
+  clatter12 *st = new (staged_mem) clatter12();
+  st->on_setup_default_panel_state();
+  audio_block();
+  P->on_commit_staged_load_audio_thread(st, sizeof(clatter12));
   P->on_load_finished();
   run_ms(40);
 }
@@ -146,7 +166,7 @@ int main() {
 
   // ================================================================ boot and play
   run_ms(40);
-  CHECK(c12glue::g_ready, "engine ready");
+  CHECK(P->engine_ready(), "engine ready");
   CHECK(vel(0, 0) && vel(0, 4) && vel(3, 4) && vel(5, 2), "default beat");
   CHECK(brightness(sim::led(0, 0)) > 0 && brightness(sim::led(1, 0)) <= 3, "step LEDs show the beat");
   CHECK(sim::led(0, 15) == WHITE && sim::led(1, 15) != WHITE, "the current page (SEQ) is lit on row 15");
@@ -604,7 +624,7 @@ int main() {
   P->sel_track = 3;
   P->sel_step = 4;
   c12::pocket_seq_set_cell(3, 4, c12::c12x_cell_with_ext(c12::c12x_cell_with_condition(c12::c12x_cell(99, c12::c12x_tone_variation(4)), 6), 2, 3, 1));
-  c12::pocket_seq_set_swing(61);
+  P->set_swing(61); // (as the SEQ page's swing pads do)
   set_tempo_bpm(133.f, true);
   run_ms(20);
   P->level[2] = 77; P->dsend[4] = 32; P->solo = 0; P->mute = 2; P->apply_mixer();
@@ -1166,6 +1186,37 @@ int main() {
     CHECK(P->cur == 3 && P->queued_slot() < 0 && c12::pocket_seq_position() < 8, "the switch is made at the bar, from slot 4's first step (position %d)", c12::pocket_seq_position());
     CHECK(vel(5, 3) == 0 && c12::c12x_cell_velocity(P->bank[9].pat.cell[5][3]) == 90 && c12::c12x_cell_velocity(P->bank[9].pat.cell[5][7]) == 70,
           "the duplicate kept both edits, the edit made while it waited too; the original has neither");
+    // each slot has its own swing, and keeps it through switches (slot 10: 61 %, slot 4: 50 %)
+    tap(9, 0);
+    until_switch(3000);
+    P->set_swing(61);
+    tap(3, 0);
+    until_switch(3000);
+    CHECK(P->cur == 3 && c12::pocket_seq_swing() == 50 && P->bank[9].swing == 61 && P->bank[3].swing == 50,
+          "a slot's swing is its own: slot 4 plays at 50, slot 10 keeps 61 (%d, %d, %d)", c12::pocket_seq_swing(), P->bank[9].swing, P->bank[3].swing);
+    tap(9, 0);
+    until_switch(3000);
+    CHECK(c12::pocket_seq_swing() == 61, "and slot 10 plays at 61 again");
+    P->set_swing(50);
+    tap(3, 0);
+    until_switch(3000);
+    // a switch the panel has not looked at yet (no UI frame since): the next edit is to the new
+    // pattern, and the old one is put away first, whole
+    tap(9, 0);
+    {
+      const c12::pocket_pattern before4 = slot_pat(3);
+      const uint32_t sw = c12::c12_seq_switches();
+      for (int i = 0; i < 4000 && c12::c12_seq_switches() == sw; i++) audio_block(); // audio only: no on_ui
+      CHECK(c12::c12_seq_switches() == sw + 1 && P->cur == 3, "the engine has switched; the panel has not run since");
+      P->seq_cell(6, 1, c12::c12x_cell(66, 0)); // an edit arrives first
+      CHECK(P->cur == 9 && memcmp(&P->bank[3].pat, &before4, sizeof before4) == 0 && vel(6, 1) == 66 &&
+                c12::c12x_cell_velocity(P->bank[3].pat.cell[6][1]) == 0,
+            "the edit goes to the pattern now playing; slot 4 was put away untouched first");
+      P->seq_cell(6, 1, 0);
+      run_ms(8);
+    }
+    tap(3, 0);
+    until_switch(3000);
     // cancel
     tap(9, 0);
     tap(9, 0);
@@ -1437,61 +1488,99 @@ int main() {
     run_ms(8);
   }
 
-  // ================================================================ a load holds the engine
+  // ================================================================ loads never touch the engine
   {
+    auto engine_bytes = [](uint8_t *out) { memcpy(out, (const uint8_t *)P + P->state_bytes(), sizeof(clatter12) - P->state_bytes()); };
+    static uint8_t tail_a[sizeof(clatter12)], tail_b[sizeof(clatter12)];
+    const size_t tail = sizeof(clatter12) - P->state_bytes();
+    CHECK(tail >= sizeof(c12::c12_engine_ram) + sizeof(P->verb_lines) && (const uint8_t *)&P->engine_ram > (const uint8_t *)P + P->state_bytes(),
+          "the engine's memory and the reverb's lines are the tail of the object, after everything a load replaces");
     only_kick(1);
+    for (int t = 0; t < 7; t++) P->rsend[t] = 112;
+    P->apply_mixer();
+    c12::c12_fx_set(c12::c12x_fx_space_engine, 0);
+    c12::c12_fx_set(c12::c12x_fx_verb_decay, 100);
+    if (!is_transport_playing()) start_transport();
+    run_ms(600);
+    save();
+    // a saved song: the commit (on the audio core, between two callbacks) leaves the tail alone,
+    // the engine plays on, and the reverb's tail with it
+    {
+      memset(staged_mem, 0, sizeof staged_mem);
+      clatter12 *st = new (staged_mem) clatter12();
+      P->on_prepare_staged_load(st, sizeof staged_mem);
+      CHECK(P->engine_ready() && !st->engine_ready() && st->engine_token == 0, "the staged copy has no engine of its own");
+      for (int i = 0; i < 10; i++) audio_block(); // the live panel keeps playing while the file is read
+      serialiser_t rs(true, save_text, sizeof save_text, save_len);
+      const bool ok = st->on_serialise(rs, st->get_version());
+      engine_bytes(tail_a);
+      const size_t at = session.size();
+      P->on_commit_staged_load_audio_thread(st, sizeof(clatter12));
+      engine_bytes(tail_b);
+      CHECK(ok && memcmp(tail_a, tail_b, tail) == 0, "a commit does not write the engine's memory or the reverb's lines");
+      CHECK(P->engine_ready() && P->load_pending, "the panel is still the engine's owner, with a project to apply");
+      P->on_load_finished();
+      audio_block();
+      audio_block();
+      bool gap = false;
+      for (size_t i = at; i + 1 < session.size(); i += 2) gap = gap || (session[i] == 0 && session[i + 1] == 0 && i > at + 32);
+      stop_transport();
+      run_ms(300);
+      CHECK(rms_since(at) > 20 && !gap, "no silence at a load: the engine and the reverb's tail play through it (rms %.0f)", rms_since(at));
+    }
+    // a file that is not CLATTER 12's: the load fails (on_serialise false), nothing is committed
+    const uint32_t ph = pattern_hash(), kh = kit_hash();
+    CHECK(!load("{\"other\":12}", 12) && pattern_hash() == ph && kit_hash() == kh, "a file without CLATTER 12's project fails the load; nothing changes");
+    // Plinky's blank slot: no prepare, a fresh copy with on_setup_default_panel_state. The engine
+    // keeps its memory; the project is the default one again
+    P->seq_cell(2, 9, c12::c12x_cell(77, 0));
+    P->level[1] = 40;
+    P->apply_mixer();
+    c12::c12_fx_set(c12::c12x_fx_dly_feedback, 99);
+    tap(0, 12, 120, 40); // (whatever page: harmless)
+    go(GEN);
+    tap(0, 12); // NEW KIT: a kit that is not the init kit
+    go(SEQ);
+    const uint32_t kit_changed = kit_hash();
+    P->bank[5].pat.cell[0][0] = c12::c12x_cell(100, 0);
     if (!is_transport_playing()) start_transport();
     run_ms(200);
-    save();
-    // Plinky's sequence, with core 1's callbacks between the steps as on the device
-    alignas(16) static unsigned char st_mem[sizeof(clatter12)];
-    memset(st_mem, 0, sizeof st_mem);
-    clatter12 *st = new (st_mem) clatter12();
-    P->on_prepare_staged_load(st, sizeof st_mem); // asks core 1 to hold (no core 1 here: it times out, then copies)
-    CHECK(c12glue::g_hold_req == 1, "prepare asks core 1 to hold the engine");
-    const size_t at = session.size();
-    audio_block(); // core 1 answers: one block, faded out
-    CHECK(c12glue::g_hold_ack == 1, "core 1 answers after one block");
-    int tail = 0;
-    for (int i = 0; i < 8; i++) tail = maxi(tail, abs(session[at + BLOCK_SIZE * 2 - 2 + (i & 1)]));
-    CHECK(tail < 600, "that block fades to silence");
-    static uint8_t ram_before[sizeof(c12::c12_engine_ram)];
-    memcpy(ram_before, &P->engine_ram, sizeof ram_before);
-    const uint32_t held0 = c12glue::g_diag.held;
-    for (int i = 0; i < 20; i++) audio_block();
-    bool silent = true;
-    for (size_t i = at + BLOCK_SIZE * 2; i < session.size(); i++) silent = silent && session[i] == 0;
-    CHECK(silent && c12glue::g_diag.held == held0 + 20, "held: silence, and counted");
-    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "held: core 1 leaves the engine's memory untouched");
-    ui_frame(); // core 0 leaves the engine alone too while the load is pending
-    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "held: so does on_ui");
-    // the copy prepare made is now taken again, read and written back (Plinky's commit)
-    memset(st_mem, 0, sizeof st_mem);
-    st = new (st_mem) clatter12();
-    P->on_prepare_staged_load(st, sizeof st_mem); // already held: answered at once
-    serialiser_t rs(true, save_text, sizeof save_text, save_len);
-    st->on_serialise(rs, st->get_version());
-    memcpy((void *)P, (const void *)st, sizeof(clatter12));
-    CHECK(memcmp(ram_before, &P->engine_ram, sizeof ram_before) == 0, "the commit writes back the engine exactly as it was held");
-    P->on_load_finished();
+    engine_bytes(tail_a);
+    load_blank();
+    CHECK(P->engine_ready() && c12::pocket_seq_playing(), "the blank slot: the engine is still up and playing");
+    CHECK(vel(0, 0) == 110 && vel(3, 4) == 105 && vel(2, 9) == 0 && P->cur == 0 && !P->bank[5].pat.cell[0][0], "the default beat in slot 1, the bank empty");
+    CHECK(P->level[1] == c12::c12x_level_unity && c12::c12_fx_get(c12::c12x_fx_dly_feedback) == c12::c12_fx_default(c12::c12x_fx_dly_feedback),
+          "mixer and FX at their defaults, in the engine too");
+    uint8_t init_kit[c12::c12x_kit_params];
+    c12::c12_kit_design(init_kit, -1, 0, 50);
+    CHECK(kit_hash() != kit_changed && memcmp(P->kit + 1, init_kit + 1, (size_t)c12::c12x_sound_params - 1) == 0, "the kit is the init kit again");
+    CHECK(!P->hist_undo && !P->chain_len && P->queued_slot() < 0, "no undo history, no chain, nothing queued");
     const size_t at2 = session.size();
-    audio_block();
-    CHECK(c12glue::g_hold_req == 0 && c12glue::g_hold_ack == 0, "released: core 1 runs the engine again");
-    CHECK(abs(session[at2]) < 600, "the first block after fades in");
-    run_ms(400);
-    CHECK(rms_since(at2) > 50, "and it plays on");
-    // a hold no load ever finishes is let go
-    memset(st_mem, 0, sizeof st_mem);
-    st = new (st_mem) clatter12();
-    P->on_prepare_staged_load(st, sizeof st_mem);
+    run_ms(600);
+    CHECK(rms_since(at2) > 50, "and it plays");
+
+    // A panel restart (Plinky zeroes the arena and constructs the panel again; PSRAM may have been
+    // another panel's meanwhile): the engine comes up again on clean memory, tables unpacked again
+    stop_transport();
     run_ms(40);
-    CHECK(c12glue::g_hold_req == 1, "still held while the load may be under way");
-    sim::advance_us(c12glue::HOLD_TIMEOUT_US);
+    memset(sim_psram, 0xa5, 600 * 1024); // tables, delay lines, undo, save area: all scribbled
+    memset((void *)P, 0, sizeof(clatter12));
+    P = new ((void *)P) clatter12();
+    P->on_setup_default_panel_state();
+    CHECK(!P->engine_ready(), "a new panel object: not ready, though an engine was up before");
+    audio_block(); // core 1 before core 0 has brought it up: silence, nothing touched
+    CHECK(session[session.size() - 1] == 0, "core 1 leaves the engine alone until it is up");
     run_ms(40);
-    CHECK(c12glue::g_hold_req == 0, "let go after the timeout");
+    CHECK(P->engine_ready() && vel(0, 0) == 110, "brought up again, with the default project");
     const size_t at3 = session.size();
-    run_ms(400);
-    CHECK(rms_since(at3) > 50, "and the engine plays again");
+    start_transport();
+    run_ms(1200);
+    c12::c12_engine_stats st3;
+    c12::c12_engine_stats_read(&st3);
+    CHECK(rms_since(at3) > 50 && peak_since(at3) < 30000 && st3.clipped == 0 && st3.underruns == 0,
+          "it plays cleanly after the restart: tables and delay lines rebuilt (rms %.0f, peak %d)", rms_since(at3), peak_since(at3));
+    stop_transport();
+    run_ms(40);
   }
 
   // ================================================================ audio health over the session

@@ -1,4 +1,32 @@
-# Hardware integration audit (2026-11-13, 0.0.5-exp; updated for 0.0.6)
+# Hardware integration audit (2026-11-14, 0.0.7-exp)
+
+## 0. Checked against Plinky's published API header (2026-11-14)
+
+plinky12.com is not reachable from the development sessions, but CI can fetch the published bundle
+(`plinky_library.h`, 10 206 lines; sha256 `c9efd90e...`, changed since it was first pinned). An opt-in
+CI job (`api-audit`, `tools/api_excerpt.py`, for commits tagged `[api-audit]`) prints the declarations
+CLATTER 12 depends on, and they were compared with `sim/plinky_sim.h` and the glue. What it settled:
+
+| | From the header | Consequence |
+|---|---|---|
+| **`panel_t` is not empty** | it holds `synth_presets[13]` (each: 8 values per voice parameter, a modulation matrix, two XY recordings, eight slices, names), `lfo_recordings[]`, a song name: about 24 KB, and "the hard size limit for your panel is 128 KB" counts the whole object | **0.0.6 (with the pattern bank in the object, 105.7 KB of its own) would have exceeded 128 KB and failed to compile on Plinky's server.** The bank is now in PSRAM; CLATTER 12's own members are 90.5 KB; the stand-in base is a pessimistic 28 KB, so `make m33` checks 119 KB against 128 |
+| Commit hook | `virtual void on_commit_staged_load_audio_thread(panel_t *loaded_state, size_t panel_memory_size)`: `synth_note_up_all(); memcpy(this, loaded_state, panel_memory_size); refresh_modulation_masks();`, on core 1 | overridden to call Plinky's own with the length of everything before the engine tail: a load never writes the running engine. The earlier "hold the audio core" scheme is gone (no silence at a load) |
+| Blank slot `00/00` | constructs a fresh copy, calls `on_setup_default_panel_state()` on it, commits it; **`on_prepare_staged_load` is skipped** | **a bug in 0.0.5-0.0.6**: the whole-object commit would have zeroed the engine's memory while it ran. Fixed by the override; `new_project()` resets kit, FX, mixer and bank. Tested |
+| Failing a load | field macros `return false` from `on_serialise` on any error; a failed load is dropped | a file without a valid CLATTER 12 project now returns false |
+| `FIELD_BASE64(key, data, length, max_length)` | "Variable-length buffer ... length is an int lvalue: bytes to write, replaced with bytes decoded on read"; keys under 16 characters; fields are `case` labels in a `switch` (nothing else may sit between `OBJECT_BEGIN` and `OBJECT_END`) | the version-3 project (one variable-length field) is used as documented |
+| `panel_page_t::saveload(int y, bool draw_title, int flags, load_mode)` | draws the picker at `y .. y + 16` | confirms the 0.0.5 fix (`PAGE_SAVE * 16`) |
+| `mix_buffers_t` | `dry[BLOCK_SIZE * 2]`, `delaysend[BLOCK_SIZE]`, `reverbsend[BLOCK_SIZE]` ("half sample rate": Plinky's own `worm` fills all 64 entries a block, as CLATTER 12 does) | as used |
+| `uint32_t time_us()`, `draw_system_style_settings_page(name4, value4, bar_percent, ...)` returning the change a touch asks for | | as used by the diagnostics |
+| DSP load, underrun or overrun counters | none exposed to panels | the diagnostics' own timing is the only source |
+| `PLINKY_DSP_RAM_FUNC` | "Use it sparingly ... Moving too much code to SRAM will exhaust the limited RAM code region and prevent the panel from linking" | the `_sram` variant (15 KB) stays an experiment |
+| Stack | "avoid objects larger than about 128 bytes and treat 256 bytes as a hard upper bound" | the LXR's three block functions have 280-296 B frames (two 64-sample buffers, on core 1); the deepest chains are 752 B (core 1) and 712 B (core 0) |
+| Shadow arena | `get_panel_shadow_state()`: foreground scratch only, may be overwritten by any save or load | not used |
+| Clock | `int64_t get_clock_phase()`, Q16 quarter notes | available for a phase lock (not done) |
+| Panel lifecycle | "the system zeroes and constructs the live instance" at panel startup; PSRAM is "a shared scratch area" | the engine is re-brought-up for a new object (tables unpacked and delay lines cleared again). Tested |
+
+Still unknown: the exact size of `panel_t` (estimated from its declaration), whether core 0's `on_ui`
+can run during a commit, and everything in "What only a device can answer".
+
 
 CLATTER 12 against Plinky 12's public panel interface and firmware, before any device test. Every
 finding says what it rests on:
@@ -37,8 +65,8 @@ CI fetches it for `tools/check_api.py`.
 | **Static SRAM** | **The deciding finding.** Firmware 90bd with Grid and a panel with no static data (zone_plate, arcade_12) ends `.bss` at 0x2007b0bc: **20 292 bytes** before the end of main SRAM, from which the pico-sdk reserves the heap (2 KB by default) and fails the link if it does not fit. Ambiotica leaves 2 808 bytes. CLATTER 12 0.0.4 needed **140 KB** (`clatter_12.cpp`) or **40 KB** (`_psram`): neither could have linked | **source**: `tools/firmware_ram.py` reads crt0's data copy table and `.bss` bounds from the images |
 | Now | **1.7 KB** of static SRAM (`.bss` 1 656, `.data` 56), gc-linked, at every optimisation level. The LXR tables went to PSRAM (default); the engine's 39 KB of working memory to the panel object (`tools/amalgamate.py` `RELOCATE`, bit-identical); the 33 KB undo history to PSRAM. `make m33` fails above 8 KB | **test** (compile and panel-only link); the real link: **unknown** |
 | `_sram` variant | puts 15 KB of LXR code in SRAM: 17.2 KB static at `-O3`, beside a budget of about 18 KB less the heap. Kept for a measured experiment only | **test**; whether it links: **unknown**, likely not |
-| Panel arena | 128 KB, "always yours", the whole object. CLATTER 12's object: **103.2 KB** (0.0.6, with the 16-slot pattern bank 30.7 KB; engine memory 41 KB, reverb lines 26 KB). A `static_assert` stops a build over 128 KB | arena size: **source** (Plinky developers via SYSTEM_NOTES); size: **test** |
-| PSRAM | ~7.5 MB usable (`get_psram_size()`, the system FX delay's last 128 KB excluded). CLATTER 12: tables at 0 (100 KB), delay 128 KB in (256 KB), undo 384 KB in (33 KB of 64). Slow, "an order of magnitude", behind a small XIP cache shared with flash code; sequential good, scattered bad | **source**; layout: **test** (simulator) |
+| Panel object | 128 KB hard limit on the whole object, **Plinky's `panel_t` included** (about 24 KB; section 0). CLATTER 12's own: 90.5 KB (engine memory 41 KB, reverb lines 26 KB, sine table 8 KB, UI and project state 15 KB). A `static_assert` stops a build over 128 KB | limit and base: **source** (Plinky's header); own size: **test**; the base's exact size: **unknown** |
+| PSRAM | ~7.5 MB usable (`get_psram_size()`, the system FX delay's last 128 KB excluded). CLATTER 12 needs 576 KB: wavetables and transients at 0 (92 KB), delay 128 KB in (256 KB), undo 384 KB in (33 KB of 64), a save or load 448 KB in (up to 64 KB), the pattern bank twice 512 KB in (2 x 32 KB). Without it the panel shows a red pad and does nothing. Slow, "an order of magnitude", behind a small XIP cache shared with flash code; sequential good, scattered bad | **source**; layout: **test** (simulator) |
 | PSRAM access | The delay: one sequential stream each way. The tables: oscillators read a 2 KB band-limited row each (six voices), transients sequentially; the sine table (8 KB) is shared. Undo: 2 KB copies on core 0 when a change is made. **The XIP cache's behaviour with 144 KB of `-O3` code plus table reads is the largest performance unknown** | access patterns: **source**; cost: **unknown** |
 | Stack | Deepest chains (GCC's call graph, with the engine's two indirect calls followed): core 1 from `on_dsp` 760 B, core 0 from `on_ui` 664 B at `-O3`. Largest frames on them: the LXR's snare, hi-hat and cymbal block functions, 280-296 B (two 64-sample buffers). Guidance: stack objects under 128 B, 256 at most; the core-1 stack size is not published (pico-sdk default 2 KB) | **test**; stack sizes: **unknown** |
 | Allocation | none (no `new`, `malloc`, containers); the panel object is placement-constructed by the firmware | **source** |
@@ -59,7 +87,7 @@ CI fetches it for `tools/check_api.py`.
 | Contract | `on_dsp` on core 1 per 64-frame block; CLATTER 12 fills `mix_buffers_t.dry` and the two sends and returns `false` (Plinky's mix and FX follow on the same core). `SAMPLE_FREQ` 32 kHz (Plinky's emulator log) | **source**; the cost of Plinky's chain after it: **unknown** |
 | Real-time safety | no allocation, no locks, no printf or formatting on core 1; core 0 ↔ core 1 by single aligned words and Pocket's lock-free ring. Diagnostics add two `time_us()` readings (the RP2350's hardware timer) and a few adds and compares per callback | **source**, **test** |
 | CPU | QEMU: 191 000 instructions per block mean, 213 000 busiest (all tracks, delay and reverb, `-O3`); 64-71 % of a 150 MHz core at one instruction a cycle; the whole LXR FX chain 89 %. Instructions are a lower bound on cycles | **test** (QEMU); cycles, clock, Plinky's chain: **unknown** (the `_cycles` build measures cycles and the clock on a device) |
-| Loads | the engine's memory is in the panel object, so a load holds core 1 (one faded block, silence, nothing touched) while the object is copied; released on apply, `on_load_finished`, or 10 s | **test** (simulator, Plinky's documented sequence); the real firmware's timing: **unknown** |
+| Loads | the engine's memory is the tail of the panel object; the commit hook is overridden so a load replaces only what comes before it (section 0). The engine plays through a load | **source** (the hook, from Plinky's header), **test** (simulator, Plinky's documented sequence, blank slot included); on a device: **unknown** |
 
 ## 5. Clock and transport
 
@@ -80,7 +108,7 @@ CI fetches it for `tools/check_api.py`.
 
 ## 7. Source size
 
-477 KB (`--compact`: the glue's comments stripped, Pocket's packed tables written as string literals;
+481 KB (`--compact`: the glue's comments stripped, Pocket's packed tables written as string literals;
 `test_panel_sim_compact` plays the whole simulated session from it, sample-identical to the readable
 file). The reported hardware failure was a
 compile error, so Plinky's server accepted the 483 KB file of 0.0.4 for **Flash**: at least that much

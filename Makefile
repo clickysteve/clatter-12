@@ -63,6 +63,9 @@ $(BUILD)/test_engine: tests/test_engine.c tests/check.h $(BUILD)/c12_unity.o
 	$(CC) $(TEST_CFLAGS) tests/test_engine.c $(BUILD)/c12_unity.o -lm -o $@
 $(BUILD)/test_perform: tests/test_perform.c tests/check.h $(BUILD)/c12_unity.o
 	$(CC) $(TEST_CFLAGS) tests/test_perform.c $(BUILD)/c12_unity.o -lm -o $@
+# the pattern lock on two real threads (audio rendering against edits, replacements and queued switches)
+$(BUILD)/test_threads: tests/test_threads.c tests/check.h $(BUILD)/c12_unity.o
+	$(CC) $(TEST_CFLAGS) tests/test_threads.c $(BUILD)/c12_unity.o -lm -lpthread -o $@
 $(BUILD)/equiv_c: tests/equiv_c.c tests/scenario.inc $(BUILD)/c12_unity.o
 	$(CC) $(TEST_CFLAGS) -ffp-contract=off tests/equiv_c.c $(BUILD)/c12_unity.o -lm -o $@
 $(BUILD)/equiv_cxx: tests/equiv_cxx.cpp tests/scenario.inc $(BUILD)/c12_engine.inc
@@ -88,10 +91,11 @@ $(BUILD)/test_authentic: tests/test_authentic.cpp tests/check.h $(BUILD)/c12_eng
 $(BUILD)/bench: tests/bench.c $(BUILD)/c12_unity.o
 	$(CC) $(TEST_CFLAGS) tests/bench.c $(BUILD)/c12_unity.o -lm -o $@
 
-test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD)/equiv_c $(BUILD)/equiv_cxx $(BUILD)/test_authentic $(BUILD)/test_panel_sim $(BUILD)/test_panel_sim_compact
+test: $(BUILD)/test_resampler $(BUILD)/test_engine $(BUILD)/test_perform $(BUILD)/test_threads $(BUILD)/equiv_c $(BUILD)/equiv_cxx $(BUILD)/test_authentic $(BUILD)/test_panel_sim $(BUILD)/test_panel_sim_compact
 	$(BUILD)/test_resampler
 	$(BUILD)/test_engine
 	$(BUILD)/test_perform
+	$(BUILD)/test_threads
 	$(BUILD)/test_authentic
 	$(BUILD)/equiv_c $(BUILD)/test/equiv_c.raw
 	$(BUILD)/equiv_cxx $(BUILD)/test/equiv_cxx.raw

@@ -167,15 +167,16 @@ needs beyond a few hundred bytes lives in the panel object (Plinky's 128 KB aren
 | constants (packed tables, kit recipes, styles, LXR parameter tables, FX tables) | 27 KB | flash |
 | LXR tables, unpacked | 100 KB | PSRAM, from its start (`C12_TABLES_IN_PSRAM 1`, the default) |
 | static state left in static SRAM (sequencer and performance counters, profile, diagnostics) | 1.7 KB | static SRAM |
-| the pattern bank: 16 slots (steps, length, swing, generator settings), and a working slot | 30.7 KB | the panel object (`bank`, `work`) |
+| the pattern bank: 16 slots (steps, length, swing, generator settings), in two areas (the one in use; the one a project being loaded is read into) | 2 x 29 KB | PSRAM, 512 KB in. Copied whole, at control rate, never under the pattern lock |
+| the LXR's sine table (read by every sine oscillator and LFO each sample) | 8 KB | the panel object (the rest of the tables: PSRAM) |
 | the engine's working memory (LXR voices and parameters, event ring, the two pattern buffers and the queued one, converter 12 KB, mix and send buffers, strokes, trigger log) | 41 KB | the panel object (`engine_ram`, `c12_engine_ram_bind`) |
 | delay lines | 256 KB | PSRAM, 128 KB in (bound at run time; none: silent) |
 | undo history (16 snapshots, each with its pattern slot) | 33 KB | PSRAM, 384 KB in (none: no undo) |
 | a save or a load, as bytes (project version 3) | up to 30 KB of 64 KB | PSRAM, 448 KB in |
 | reverb lines | 26 KB | the panel object (the last member, kept out of a staged load's copy, so a load leaves them silent) |
-| panel object (UI state, the kit, the pattern bank, a loaded project's settings, two alternative patterns, scenes, the engine's memory, the reverb's lines) | 103.2 KB | Plinky's 128 KB panel arena (a `static_assert` stops a build that does not fit) |
+| panel object (UI state, the kit, a loaded project's settings, pattern buffers, scenes; then the engine tail: the engine's memory, the sine table, the reverb's lines) | 90.5 KB of CLATTER 12's own, plus Plinky's `panel_t` (its preset bank: about 24 KB by its header; `sim/plinky_sim.h` stands in 28 KB) | Plinky's 128 KB panel limit, which counts both (a `static_assert` stops a build that does not fit) |
 | stack | deepest chain 768 B from `on_dsp` (core 1), 656 B from `on_ui` (core 0), GCC's call graph | the cores' stacks |
-| source file | 477 KB (`--compact`: engine compacted, its packed tables as string literals, glue without comments; the same program, `test_panel_sim_compact`) | the IDE |
+| source file | 481 KB (`--compact`: engine compacted, its packed tables as string literals, glue without comments; the same program, `test_panel_sim_compact`) | the IDE |
 
 **How the engine's memory moved** (`tools/amalgamate.py`, `RELOCATE`). The LXR's, Pocket's and CLATTER
 12's zero-initialised file-scope objects are listed by name. For each, a macro defined before its first
@@ -188,13 +189,19 @@ static one. A declaration with an initialiser, or a second declaration of the sa
 (a parameter, a local, a member), fails the tool, by a compile and a `-Wshadow` check of the text.
 Cost: about 0.3 % more instructions per block (QEMU), one pointer load per function.
 
-**Project loads.** Plinky loads a project by constructing a staged copy of the panel, asking the live
-panel to prepare it (`on_prepare_staged_load`), reading the file into it, and then copying it over the
-live object from the audio thread. With the engine's memory in the object, core 1 must not be
-changing it while the copy is taken, or the copy written back would be torn: `on_prepare_staged_load`
-holds the engine (core 1 renders one block faded out, then outputs silence and touches nothing),
-copies, and the hold ends when the load is applied, when Plinky calls `on_load_finished`, or after
-10 s. What is written back is then exactly the held engine. The first block after fades in.
+**Project loads** (Plinky's header, "Panel Lifecycle"; checked against it, docs/HARDWARE_AUDIT.md). Plinky
+constructs a fresh copy of the panel in its second arena, calls `on_prepare_staged_load` on the live one,
+reads the file into the copy, and later, from the audio core at a safe point, calls
+`on_commit_staged_load_audio_thread`, whose default is a `memcpy` of the copy over the live object. The
+blank slot `00/00` skips the prepare and the file. The engine's memory is at the end of the object
+(the *engine tail*: a token, the engine's RAM, the sine table, the reverb's lines) and is running, so
+CLATTER 12 overrides the commit hook to call Plinky's own with a shorter length: everything before the
+tail is replaced, the tail never. The engine plays through a load, reverb tail included; `on_ui` then
+applies the loaded project, or builds a new one (`new_project`: kit, FX, mixer, bank and pattern back to
+defaults) after a blank load. A file that is not a CLATTER 12 project fails the load (`on_serialise`
+returns false), as an unreadable field does. The engine belongs to the object that brought it up
+(`g_engine_owner` and the tail's token): a panel constructed anew in a zeroed arena brings it up
+again, unpacking the tables and clearing the delay lines again, since PSRAM is shared between panels.
 
 **Pattern switching** (`c12_seq_queue`, `core/c12_engine.c` `seq_switch`). The control context
 copies the pattern to be switched in into the engine's queued buffer, with its slot number, swing and
@@ -205,10 +212,15 @@ advance lands on the right step (the new pattern's first, or the same position f
 buffers flip. Then Pocket fires the step from the new pattern: the clock, the swing pairs and the
 tempo are untouched. Flam and drag graces played ahead of a step look into the queued pattern when the
 next step is a switch. The control context writes patterns only under a two-flag lock
-(`c12_seq_lock`): the audio context, meeting it held at a boundary, waits for it (a few microseconds
-at most, bounded; `c12_seq_late` counts any it could not wait for: 0 in every test). The pattern the
-switch replaced stays in Pocket's spare buffer, with every edit made to it, until the panel takes it
-back into its slot (`bank_sync`, before any other pattern write). Chains are counted on core 0 from the
+(`c12_seq_lock`), held for one copy of a pattern at most: generators and mutations work on a copy with
+the lock released, and PSRAM (the bank) is never touched under it. The audio context, meeting the lock
+held at a boundary, waits about 0.1 ms at most; a switch that still cannot be made on its boundary is
+made at the next step, keeping the position: a step late, never a bar (`c12_seq_late`; 0 in the
+single-threaded tests). Taking the lock from the panel always takes in a switch first (`sync_locked`):
+the pattern the switch replaced, with every edit made to it, goes back to its slot before anything
+else can be written, so a slot can never receive another slot's steps. `tests/test_threads.c` runs the
+audio and control sides on two real threads (millions of edits against thousands of switches) and
+checks exactly that. Chains are counted on core 0 from the
 engine's count of pattern starts, and each entry's successor is queued for the pattern's END during
 its last pass, so the engine makes every chain step on the step itself.
 

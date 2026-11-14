@@ -41,7 +41,7 @@ EXPORT("c12p_init") int c12p_init(void) {
     sim::ui_frame_edges();
     P->on_ui(4000);
   }
-  return c12glue::g_ready ? 0 : -1;
+  return P->engine_ready() ? 0 : -1;
 }
 // One UI frame (4 ms): two audio blocks, then on_ui. The 128 frames of audio are in c12p_pcm.
 EXPORT("c12p_frame") void c12p_frame(void) {
@@ -109,10 +109,12 @@ EXPORT("c12p_load") int c12p_load(int len) {
   clatter12 *st = new (staged_mem) clatter12();
   P->on_prepare_staged_load(st, sizeof staged_mem);
   serialiser_t s(true, text, sizeof text, len);
-  st->on_serialise(s, st->get_version());
-  const bool ok = st->load_pending;
-  memcpy((void *)P, (const void *)st, sizeof(clatter12));
-  P->on_load_finished();
+  // as Plinky does: a file that cannot be read fails the load and nothing is committed
+  const bool ok = st->on_serialise(s, st->get_version());
+  if (ok) {
+    P->on_commit_staged_load_audio_thread(st, sizeof(clatter12));
+    P->on_load_finished();
+  }
   return ok ? 0 : 1;
 }
 // what pad (x, y) of the shown page does: name \n kind \n description, or "" (c12p_text)

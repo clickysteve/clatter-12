@@ -5,7 +5,7 @@
 # Copyright (C) 2026 The CLATTER contributors. SPDX-License-Identifier: GPL-3.0-only
 set -eu
 URL=https://plinky12.com/docs/ide_api/plinky_library.h
-SHA=ec52860ee009cf3e6ad08d468794b41baae29ea7c60e87e8a0b18856d07315ba
+SHA=c9efd90e43ed4c44e601a1c8ca137b6f2217281c676dbc175dc19ba36ed8f129
 OUT=build/plinky_library.h
 mkdir -p build
 curl -fsSL "$URL" -o "$OUT.tmp"

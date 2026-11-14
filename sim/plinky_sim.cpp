@@ -86,6 +86,8 @@ void panel_page_t::saveload(int y, bool, int) {
   saveloads++;
 }
 
+void synth_note_up_all(void) {}
+
 // ---- the serialiser ----
 static void put(serialiser_t &s, const char *t) {
   while (*t && s.len < s.cap - 1) s.buf[s.len++] = *t++;

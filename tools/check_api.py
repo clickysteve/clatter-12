@@ -18,7 +18,7 @@ if not os.path.exists(bundle):
     print("check_api: build/plinky_library.h missing (run tools/fetch-plinky-headers.sh); NOT CHECKED")
     sys.exit(0)
 
-SIM_ONLY = {"sim", "sim_psram", "palette_init", "make_palette_entry"}
+SIM_ONLY = {"sim", "sim_psram", "palette_init", "make_palette_entry", "sim_base_state", "SIM_PANEL_BASE"}
 # Names the published bundle does not declare but Plinky's own example panels use, so the IDE
 # provides them. Each with where it is used.
 EXAMPLE_ONLY = {

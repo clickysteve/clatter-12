@@ -32,7 +32,7 @@ Checks (any failure exits non-zero):
   - the deepest call chain from on_dsp (core 1) and from on_ui and the other core-0 hooks stays
     within --dsp-stack / --ui-stack bytes, from GCC's own call graph and frame sizes
     (-fcallgraph-info=su), with the engine's two indirect calls (its clock and the LXR block hook)
-    followed to their targets. The core-1 stack is not published (the pico-sdk's default is 2 KB);
+    followed to their targets (and any other indirect call on a chain failing the check). The core-1 stack is not published (the pico-sdk's default is 2 KB);
     the limits leave room for the firmware's own frames and interrupts. Frames over 256 bytes on
     those chains are listed (Plinky's guidance: keep stack objects under 128 bytes, 256 at most).
 """
@@ -52,7 +52,11 @@ extern "C" const char c12_panel_object_size[sizeof(clatter12)];
 __attribute__((section(".c12meta"))) const char c12_panel_object_size[sizeof(clatter12)] = {0};
 """
 # indirect calls GCC's call graph cannot follow, and their targets in the panel
-INDIRECT = {"c12_engine_render": ["clock_us"], "run_stage": ["clock_us", "block_hook"], "now_us": ["clock_us"]}
+# Indirect calls GCC's call graph cannot follow. The engine (namespace c12) has exactly three
+# function pointers: its clock (the panel's clock_us), Pocket's block hook (block_hook) and the
+# sequencer's emit (seq_emit); any engine function that calls indirectly is given all three as
+# possible targets. An indirect call anywhere else on a chain fails the check.
+ENGINE_TARGETS = ["clock_us", "block_hook", "seq_emit"]
 ROOTS = {"core 1": ["on_dsp("], "core 0": ["on_ui(", "on_serialise(", "on_prepare_staged_load(", "on_load_finished("]}
 
 
@@ -69,12 +73,26 @@ def callgraph(ci):
     for k, (lab, _) in nodes.items():
         short = re.sub(r"\(.*", "", lab).split("::")[-1].split(" ")[-1]
         by_short.setdefault(short, []).append(k)
+    unknown = set()
     for k, (lab, _) in nodes.items():
         short = re.sub(r"\(.*", "", lab).split("::")[-1].split(" ")[-1]
-        if "__indirect_call" in edges.get(k, ()) and short in INDIRECT:
-            for target in INDIRECT[short]:
-                edges[k].update(by_short.get(target, []))
-    return nodes, edges
+        if "__indirect_call" in edges.get(k, ()):
+            if " c12::" in " " + lab or lab.startswith("c12::"):
+                for target in ENGINE_TARGETS:
+                    edges[k].update(t for t in by_short.get(target, []) if t != k)
+            else:
+                unknown.add(k)
+    return nodes, edges, unknown
+
+
+def reach(edges, root):
+    seen, todo = set(), [root]
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo += list(edges.get(n, ()))
+    return seen
 
 
 def worst_chain(nodes, edges, root):
@@ -191,14 +209,22 @@ def main():
                 g = sections(elf)
                 sram = g["data"] + g["bss"] + g["tc"]
                 pb = panel_bytes(elf)
-                nodes, edges = callgraph(obj[:-2] + ".ci")
-                chains = {}
+                nodes, edges, unknown = callgraph(obj[:-2] + ".ci")
+                chains, blind = {}, set()
                 for core, pats in ROOTS.items():
                     for k, (lab, _) in nodes.items():
                         if "clatter12::" in lab and any(p in lab for p in pats):
                             d = worst_chain(nodes, edges, k)
                             if d[0] > chains.get(core, (0,))[0]:
                                 chains[core] = d
+                            blind |= reach(edges, k) & unknown
+                # an indirect call this tool cannot follow would make the stack figures an undercount
+                # (calls into Plinky's own API through its objects are direct; virtual calls on the
+                # panel's base are the hooks themselves)
+                blind = sorted(nodes[k][0] for k in blind if "panel_t::" not in nodes[k][0])
+                if blind:
+                    say("    FAIL: indirect calls not followed (outside the engine): " + "; ".join(b[:80] for b in blind[:5]))
+                    fail = True
                 say("  %-22s -%s  ok: flash %6.1f KB code + %5.1f KB const; static SRAM %5d B (.bss %d, .data %d, "
                     "RAM code %d); panel object %s; deepest stack: core 1 %d B, core 0 %d B"
                     % (name, o, g["text"] / 1024.0, g["rodata"] / 1024.0, sram, g["bss"], g["data"], g["tc"],
